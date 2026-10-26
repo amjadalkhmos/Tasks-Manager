@@ -1,7 +1,7 @@
 import express, { type Express, type Request, type RequestHandler } from "express";
 import { z } from "zod";
 import { csvRecords, parseCsv, toCsv } from "./csv.js";
-import type { DB } from "./db.js";
+import { inChunks, type DB, type Queryable } from "./db.js";
 import { HttpError } from "./http-error.js";
 import { parseRule, recurrenceSchema, type Recurrence } from "./recurrence.js";
 
@@ -35,20 +35,20 @@ interface ExportedTask {
   blocked_by: number[];
 }
 
-export function buildExport(db: DB, userId: number) {
+export async function buildExport(db: Queryable, userId: number) {
   // Private data only: shared workspaces belong to everyone in them, so they are not part of one person's export.
-  const projects = db.prepare("SELECT id, name, color FROM projects WHERE user_id = ? AND workspace_id IS NULL ORDER BY id").all(userId);
-  const rows = db
-    .prepare(
-      `SELECT * FROM tasks WHERE user_id = ? AND (project_id IS NULL OR project_id IN (SELECT id FROM projects WHERE workspace_id IS NULL)) ORDER BY id`,
-    )
-    .all(userId) as (Record<string, unknown> & {
-    id: number;
-    recurrence_rule: string | null;
-  })[];
-  const tagStmt = db.prepare("SELECT g.name FROM tags g JOIN task_tags tt ON tt.tag_id = g.id WHERE tt.task_id = ? ORDER BY g.name");
-  const checkStmt = db.prepare("SELECT text, done FROM checklist_items WHERE task_id = ? ORDER BY position, id");
-  const depStmt = db.prepare("SELECT blocked_by_id FROM task_deps WHERE task_id = ?");
+  const projects = await db.all("SELECT id, name, color FROM projects WHERE user_id = ? AND workspace_id IS NULL ORDER BY id", userId);
+  const rows = await db.all<Record<string, any> & { id: number; recurrence_rule: string | null }>(
+    `SELECT * FROM tasks WHERE user_id = ? AND (project_id IS NULL OR project_id IN (SELECT id FROM projects WHERE workspace_id IS NULL)) ORDER BY id`,
+    userId,
+  );
+  const ids = rows.map((r) => r.id);
+  const [tagRows, checkRows, depRows] = await Promise.all([
+    inChunks(ids, (m, a) => db.all<{ task_id: number; name: string }>(`SELECT tt.task_id, g.name FROM tags g JOIN task_tags tt ON tt.tag_id = g.id WHERE tt.task_id IN (${m}) ORDER BY g.name`, ...a)),
+    inChunks(ids, (m, a) => db.all<{ task_id: number; text: string; done: number }>(`SELECT task_id, text, done FROM checklist_items WHERE task_id IN (${m}) ORDER BY position, id`, ...a)),
+    inChunks(ids, (m, a) => db.all<{ task_id: number; blocked_by_id: number }>(`SELECT task_id, blocked_by_id FROM task_deps WHERE task_id IN (${m})`, ...a)),
+  ]);
+  const of = <T extends { task_id: number }>(list: T[], id: number) => list.filter((x) => x.task_id === id);
 
   const tasks: ExportedTask[] = rows.map((r) => ({
     id: r.id,
@@ -64,21 +64,21 @@ export function buildExport(db: DB, userId: number) {
     estimate_min: r.estimate_min as number | null,
     position: r.position as number,
     completed_at: r.completed_at as string | null,
-    tags: (tagStmt.all(r.id) as { name: string }[]).map((t) => t.name),
-    checklist: (checkStmt.all(r.id) as { text: string; done: number }[]).map((c) => ({ text: c.text, done: !!c.done })),
-    blocked_by: (depStmt.all(r.id) as { blocked_by_id: number }[]).map((d) => d.blocked_by_id),
+    tags: of(tagRows, r.id).map((t) => t.name),
+    checklist: of(checkRows, r.id).map((c) => ({ text: c.text, done: !!c.done })),
+    blocked_by: of(depRows, r.id).map((d) => d.blocked_by_id),
   }));
 
-  const filters = (db.prepare("SELECT name, query_json FROM saved_filters WHERE user_id = ? ORDER BY id").all(userId) as {
-    name: string;
-    query_json: string;
-  }[]).map((f) => ({ name: f.name, query: JSON.parse(f.query_json) as Record<string, string | number> }));
+  const filters = (await db.all<{ name: string; query_json: string }>("SELECT name, query_json FROM saved_filters WHERE user_id = ? ORDER BY id", userId)).map((f) => ({
+    name: f.name,
+    query: JSON.parse(f.query_json) as Record<string, string | number>,
+  }));
 
   return { version: 1, exported_at: new Date().toISOString(), projects, tasks, filters };
 }
 
-export function exportCsv(db: DB, userId: number): string {
-  const data = buildExport(db, userId);
+export async function exportCsv(db: Queryable, userId: number): Promise<string> {
+  const data = await buildExport(db, userId);
   const projectName = new Map((data.projects as { id: number; name: string }[]).map((p) => [p.id, p.name]));
   return toCsv([
     ["id", "parent_id", "title", "notes", "project", "priority", "status", "due_at", "remind_at", "recurrence", "tags", "estimate_min", "completed_at"],
@@ -137,59 +137,55 @@ export function parseDate(raw: string, tz: number): string | null {
   return null;
 }
 
-function insertAll(db: DB, userId: number, items: Incoming[], filters: { name: string; query: Record<string, string | number> }[], defaultProject?: string): ImportResult {
+async function insertAll(db: DB, userId: number, items: Incoming[], filters: { name: string; query: Record<string, string | number> }[], defaultProject?: string): Promise<ImportResult> {
   if (items.length > MAX_TASKS) throw new HttpError(413, `Too many tasks (max ${MAX_TASKS} per import)`);
   const warnings: string[] = [];
   const projectIds = new Map<string, number>();
   let projectsCreated = 0;
 
-  const projectId = (name: string | null | undefined) => {
-    const n = (name ?? defaultProject ?? "").trim();
-    if (!n) return null;
-    const key = n.toLowerCase();
-    if (projectIds.has(key)) return projectIds.get(key)!;
-    const existing = db.prepare("SELECT id FROM projects WHERE user_id = ? AND workspace_id IS NULL AND lower(name) = ?").get(userId, key) as { id: number } | undefined;
-    let id = existing?.id;
-    if (!id) {
-      id = Number(db.prepare("INSERT INTO projects (user_id, name) VALUES (?, ?)").run(userId, n.slice(0, 100)).lastInsertRowid);
-      projectsCreated++;
-    }
-    projectIds.set(key, id);
-    return id;
-  };
+  await db.tx(async (t) => {
+    const projectId = async (name: string | null | undefined) => {
+      const n = (name ?? defaultProject ?? "").trim();
+      if (!n) return null;
+      const key = n.toLowerCase();
+      if (projectIds.has(key)) return projectIds.get(key)!;
+      const existing = await t.get<{ id: number }>("SELECT id FROM projects WHERE user_id = ? AND workspace_id IS NULL AND lower(name) = ?", userId, key);
+      let id = existing?.id;
+      if (!id) {
+        id = await t.insert("INSERT INTO projects (user_id, name) VALUES (?, ?)", userId, n.slice(0, 100));
+        projectsCreated++;
+      }
+      projectIds.set(key, id);
+      return id;
+    };
 
-  const insertTask = db.prepare(
-    `INSERT INTO tasks (user_id, project_id, title, notes, priority, status, due_at, remind_at, recurrence_rule, estimate_min, completed_at, position)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE user_id = ?)))`,
-  );
-
-  db.transaction(() => {
     const idByRef = new Map<string, number>();
     for (const it of items) {
       const status = it.status ?? "todo";
-      const info = insertTask.run(
-        userId, projectId(it.project), it.title.slice(0, 500), (it.notes ?? "").slice(0, 10000),
+      const id = await t.insert(
+        `INSERT INTO tasks (user_id, project_id, title, notes, priority, status, due_at, remind_at, recurrence_rule, estimate_min, completed_at, position)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(CAST(? AS REAL), (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE user_id = ?)))`,
+        userId, await projectId(it.project), it.title.slice(0, 500), (it.notes ?? "").slice(0, 10000),
         Math.min(3, Math.max(0, it.priority ?? 0)), status, it.due_at ?? null, it.remind_at ?? null,
         it.recurrence ? JSON.stringify(it.recurrence) : null, it.estimate_min ?? null,
         status === "done" ? (it.completed_at ?? new Date().toISOString()) : null, it.position ?? null, userId,
       );
-      const id = Number(info.lastInsertRowid);
       idByRef.set(it.ref, id);
-      for (const name of new Set((it.tags ?? []).map((t) => t.trim().toLowerCase()).filter(Boolean))) {
-        db.prepare("INSERT OR IGNORE INTO tags (user_id, name) VALUES (?, ?)").run(userId, name.slice(0, 50));
-        const tag = db.prepare("SELECT id FROM tags WHERE user_id = ? AND name = ?").get(userId, name.slice(0, 50)) as { id: number };
-        db.prepare("INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)").run(id, tag.id);
+      for (const name of new Set((it.tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))) {
+        await t.run("INSERT INTO tags (user_id, name) VALUES (?, ?) ON CONFLICT DO NOTHING", userId, name.slice(0, 50));
+        const tag = (await t.get<{ id: number }>("SELECT id FROM tags WHERE user_id = ? AND name = ?", userId, name.slice(0, 50)))!;
+        await t.run("INSERT INTO task_tags (task_id, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING", id, tag.id);
       }
-      (it.checklist ?? []).forEach((c, i) =>
-        db.prepare("INSERT INTO checklist_items (task_id, text, done, position) VALUES (?, ?, ?, ?)").run(id, c.text.slice(0, 500), Number(c.done), i + 1),
-      );
+      let position = 0;
+      for (const c of it.checklist ?? [])
+        await t.run("INSERT INTO checklist_items (task_id, text, done, position) VALUES (?, ?, ?, ?)", id, c.text.slice(0, 500), Number(c.done), ++position);
     }
     // Second pass: relations need every task to exist first.
     for (const it of items) {
       const id = idByRef.get(it.ref)!;
       if (it.parentRef) {
         const parent = idByRef.get(it.parentRef);
-        if (parent && parent !== id) db.prepare("UPDATE tasks SET parent_id = ? WHERE id = ?").run(parent, id);
+        if (parent && parent !== id) await t.run("UPDATE tasks SET parent_id = ? WHERE id = ?", parent, id);
         else warnings.push(`"${it.title}": parent not found, imported as a top-level task`);
       }
     }
@@ -198,16 +194,17 @@ function insertAll(db: DB, userId: number, items: Incoming[], filters: { name: s
       for (const ref of it.blockedByRefs ?? []) {
         const dep = idByRef.get(ref);
         if (!dep || dep === id) continue;
-        const cycle = db
-          .prepare(`WITH RECURSIVE chain(id) AS (SELECT ? UNION SELECT d.blocked_by_id FROM task_deps d JOIN chain c ON d.task_id = c.id) SELECT 1 FROM chain WHERE id = ?`)
-          .get(dep, id);
+        const cycle = await t.get(
+          `WITH RECURSIVE chain(id) AS (SELECT CAST(? AS INTEGER) UNION SELECT d.blocked_by_id FROM task_deps d JOIN chain c ON d.task_id = c.id) SELECT 1 FROM chain WHERE id = ?`,
+          dep,
+          id,
+        );
         if (cycle) warnings.push(`"${it.title}": skipped a dependency that would create a cycle`);
-        else db.prepare("INSERT OR IGNORE INTO task_deps (task_id, blocked_by_id) VALUES (?, ?)").run(id, dep);
+        else await t.run("INSERT INTO task_deps (task_id, blocked_by_id) VALUES (?, ?) ON CONFLICT DO NOTHING", id, dep);
       }
     }
-    for (const f of filters)
-      db.prepare("INSERT INTO saved_filters (user_id, name, query_json) VALUES (?, ?, ?)").run(userId, f.name.slice(0, 100), JSON.stringify(f.query));
-  })();
+    for (const f of filters) await t.run("INSERT INTO saved_filters (user_id, name, query_json) VALUES (?, ?, ?)", userId, f.name.slice(0, 100), JSON.stringify(f.query));
+  });
 
   return { tasks: items.length, projects: projectsCreated, filters: filters.length, warnings };
 }
@@ -350,15 +347,15 @@ function fromTrello(body: unknown) {
 }
 
 export function registerDataIo(app: Express, { db, auth, uid }: Deps) {
-  app.get("/api/export", auth, (req, res) => {
+  app.get("/api/export", auth, async (req, res) => {
     res.setHeader("Content-Disposition", 'attachment; filename="tasks-export.json"');
-    res.json(buildExport(db, uid(req)));
+    res.json(await buildExport(db, uid(req)));
   });
 
-  app.get("/api/export.csv", auth, (req, res) => {
+  app.get("/api/export.csv", auth, async (req, res) => {
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", 'attachment; filename="tasks-export.csv"');
-    res.send(exportCsv(db, uid(req)));
+    res.send(await exportCsv(db, uid(req)));
   });
 
   const query = z.object({
@@ -371,7 +368,7 @@ export function registerDataIo(app: Express, { db, auth, uid }: Deps) {
     "/api/import",
     auth,
     express.text({ type: ["text/csv", "text/plain"], limit: "5mb" }),
-    (req, res) => {
+    async (req, res) => {
       const q = query.parse(req.query);
       const isText = typeof req.body === "string";
       if ((q.format === "csv" || q.format === "todoist") && !isText) throw new HttpError(415, "Send CSV with Content-Type: text/csv");
@@ -380,18 +377,18 @@ export function registerDataIo(app: Express, { db, auth, uid }: Deps) {
       let result: ImportResult;
       if (q.format === "json") {
         const { items, filters } = fromOwn(req.body);
-        result = insertAll(db, uid(req), items, filters);
+        result = await insertAll(db, uid(req), items, filters);
       } else if (q.format === "trello") {
         const { items, warnings } = fromTrello(req.body);
-        result = insertAll(db, uid(req), items, [], "Trello import");
+        result = await insertAll(db, uid(req), items, [], "Trello import");
         result.warnings.push(...warnings);
       } else if (q.format === "todoist") {
         const { items, warnings } = fromTodoist(req.body as string, q.tz);
-        result = insertAll(db, uid(req), items, [], q.project || "Todoist import");
+        result = await insertAll(db, uid(req), items, [], q.project || "Todoist import");
         result.warnings.push(...warnings);
       } else {
         const { items, warnings } = fromCsv(req.body as string, q.tz);
-        result = insertAll(db, uid(req), items, [], q.project);
+        result = await insertAll(db, uid(req), items, [], q.project);
         result.warnings.push(...warnings);
       }
       res.status(201).json(result);

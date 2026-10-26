@@ -1,12 +1,13 @@
 import type { Express, Request, RequestHandler } from "express";
 import { z } from "zod";
 import {
-  FORBIDDEN, isMemberAtLeast, projectAccess, readableTask, roleIn, taskAccess, visibleArgs, visibleTasksSql, writableTask, atLeast,
-  type TaskAccess, type TaskRow,
+  FORBIDDEN, atLeast, isMemberAtLeast, projectAccess, readableTask, roleIn, taskAccess, visibleArgs, visibleTasksSql, writableTask,
+  type Role, type TaskAccess, type TaskRow,
 } from "./access.js";
-import type { DB } from "./db.js";
+import { inChunks, type DB, type Queryable } from "./db.js";
+import { countWhere, epoch, likeCI } from "./dialect.js";
 import { logActivity, notify, userName } from "./events.js";
-import { HttpError } from "./http-error.js";
+import { HttpError, parseId } from "./http-error.js";
 import { nextOccurrence, parseRule, recurrenceSchema } from "./recurrence.js";
 
 const iso = z.string().datetime({ offset: true });
@@ -42,167 +43,212 @@ interface Deps {
   uid: (req: Request) => number;
 }
 
-export function registerTasks(app: Express, { db, auth, uid }: Deps) {
-  // ---------- hydration ----------
-  const tagStmt = db.prepare("SELECT t.name FROM tags t JOIN task_tags tt ON tt.tag_id = t.id WHERE tt.task_id = ? ORDER BY t.name");
-  const depStmt = db.prepare("SELECT d.blocked_by_id AS id, t.status FROM task_deps d JOIN tasks t ON t.id = d.blocked_by_id WHERE d.task_id = ?");
-  const subStmt = db.prepare(
-    `WITH RECURSIVE d(id) AS (
-       SELECT id FROM tasks WHERE parent_id = ?
-       UNION ALL SELECT t.id FROM tasks t JOIN d ON t.parent_id = d.id)
-     SELECT COUNT(*) AS total, COALESCE(SUM(status = 'done'), 0) AS done FROM tasks WHERE id IN (SELECT id FROM d)`,
-  );
-  const checkStmt = db.prepare("SELECT COUNT(*) AS total, COALESCE(SUM(done), 0) AS done FROM checklist_items WHERE task_id = ?");
-  const timeStmt = db.prepare(
-    `SELECT COALESCE(SUM(strftime('%s', COALESCE(ended_at, ?)) - strftime('%s', started_at)), 0) AS secs,
-            COALESCE(SUM(ended_at IS NULL), 0) AS running FROM time_entries WHERE task_id = ?`,
-  );
-  const commentStmt = db.prepare("SELECT COUNT(*) AS n FROM comments WHERE task_id = ?");
-  const wsStmt = db.prepare("SELECT workspace_id AS ws FROM projects WHERE id = ?");
+/** Groups rows by their `task_id` (or another key). */
+function groupBy<T>(rows: T[], key: (r: T) => number): Map<number, T[]> {
+  const m = new Map<number, T[]>();
+  for (const r of rows) {
+    const k = key(r);
+    const list = m.get(k);
+    if (list) list.push(r);
+    else m.set(k, [r]);
+  }
+  return m;
+}
 
-  const hydrate = (rows: TaskRow[], userId: number) => {
-    const nowIso = new Date().toISOString().replace("Z", "").replace("T", " ");
+export function registerTasks(app: Express, { db, auth, uid }: Deps) {
+  const D = db.dialect;
+
+  // ---------- hydration ----------
+  /**
+   * Adds everything the UI shows beside a task (tags, dependencies, progress, time, comment count, and what the caller
+   * may do with it). It runs one query per kind of data for the whole list, not one per task, so a long list costs
+   * the same few round trips whether the database is a local file or a server across a network.
+   */
+  async function hydrate(q: Queryable, rows: TaskRow[], userId: number) {
+    if (rows.length === 0) return [];
+    const ids = rows.map((r) => r.id);
+    const nowIso = new Date().toISOString();
+
+    const [tagRows, depRows, subRows, checkRows, timeRows, commentRows] = await Promise.all([
+      inChunks(ids, (m, a) => q.all<{ task_id: number; name: string }>(`SELECT tt.task_id, g.name FROM task_tags tt JOIN tags g ON g.id = tt.tag_id WHERE tt.task_id IN (${m}) ORDER BY g.name`, ...a)),
+      inChunks(ids, (m, a) => q.all<{ task_id: number; id: number; status: string }>(`SELECT d.task_id, d.blocked_by_id AS id, t.status FROM task_deps d JOIN tasks t ON t.id = d.blocked_by_id WHERE d.task_id IN (${m})`, ...a)),
+      inChunks(ids, (m, a) =>
+        q.all<{ root: number; total: number; done: number }>(
+          `WITH RECURSIVE d(root, id, status) AS (
+             SELECT parent_id, id, status FROM tasks WHERE parent_id IN (${m})
+             UNION ALL SELECT d.root, t.id, t.status FROM tasks t JOIN d ON t.parent_id = d.id)
+           SELECT root, COUNT(*) AS total, ${countWhere("status = 'done'")} AS done FROM d GROUP BY root`,
+          ...a,
+        ),
+      ),
+      inChunks(ids, (m, a) => q.all<{ task_id: number; total: number; done: number }>(`SELECT task_id, COUNT(*) AS total, ${countWhere("done = 1")} AS done FROM checklist_items WHERE task_id IN (${m}) GROUP BY task_id`, ...a)),
+      inChunks(ids, (m, a) =>
+        q.all<{ task_id: number; secs: number; running: number }>(
+          `SELECT task_id, COALESCE(SUM(${epoch(D, "COALESCE(ended_at, ?)")} - ${epoch(D, "started_at")}), 0) AS secs, ${countWhere("ended_at IS NULL")} AS running
+           FROM time_entries WHERE task_id IN (${m}) GROUP BY task_id`,
+          nowIso, ...a,
+        ),
+      ),
+      inChunks(ids, (m, a) => q.all<{ task_id: number; n: number }>(`SELECT task_id, COUNT(*) AS n FROM comments WHERE task_id IN (${m}) GROUP BY task_id`, ...a)),
+    ]);
+
+    const projectIds = [...new Set(rows.map((r) => r.project_id).filter((p): p is number => p !== null))];
+    const [projects, memberships] = await Promise.all([
+      inChunks(projectIds, (m, a) => q.all<{ id: number; workspace_id: number | null }>(`SELECT id, workspace_id FROM projects WHERE id IN (${m})`, ...a)),
+      q.all<{ workspace_id: number; role: Role }>("SELECT workspace_id, role FROM workspace_members WHERE user_id = ?", userId),
+    ]);
+    const wsOfProject = new Map(projects.map((p) => [p.id, p.workspace_id]));
+    const roleOf = new Map(memberships.map((m) => [m.workspace_id, m.role]));
+
+    const tags = groupBy(tagRows, (r) => r.task_id);
+    const deps = groupBy(depRows, (r) => r.task_id);
+    const subs = new Map(subRows.map((r) => [r.root, r]));
+    const checks = new Map(checkRows.map((r) => [r.task_id, r]));
+    const times = new Map(timeRows.map((r) => [r.task_id, r]));
+    const comments = new Map(commentRows.map((r) => [r.task_id, r.n]));
+
     return rows.map(({ recurrence_rule, ...r }) => {
-      const deps = depStmt.all(r.id) as { id: number; status: string }[];
-      const sub = subStmt.get(r.id) as { total: number; done: number };
-      const check = checkStmt.get(r.id) as { total: number; done: number };
-      const time = timeStmt.get(nowIso, r.id) as { secs: number; running: number };
-      const ws = r.project_id === null ? null : ((wsStmt.get(r.project_id) as { ws: number | null } | undefined)?.ws ?? null);
-      const role = ws === null ? null : roleIn(db, ws, userId);
+      const taskDeps = deps.get(r.id) ?? [];
+      const sub = subs.get(r.id);
+      const check = checks.get(r.id);
+      const time = times.get(r.id);
+      const ws = r.project_id === null ? null : (wsOfProject.get(r.project_id) ?? null);
+      const role = ws === null ? null : (roleOf.get(ws) ?? null);
       // What the caller may do, so the UI can hide controls that would only fail.
       const access = ws === null || atLeast(role, "admin") ? "admin" : atLeast(role, "member") ? "write" : "read";
       return {
         ...r,
         id: r.id,
         recurrence: parseRule(recurrence_rule),
-        tags: (tagStmt.all(r.id) as { name: string }[]).map((t) => t.name),
-        blocked_by: deps.map((d) => d.id),
-        blocked: deps.some((d) => d.status !== "done"),
-        subtasks_total: sub.total,
-        subtasks_done: sub.done,
-        checklist_total: check.total,
-        checklist_done: check.done,
-        tracked_min: Math.round(time.secs / 60),
-        timer_running: time.running > 0,
+        tags: (tags.get(r.id) ?? []).map((t) => t.name),
+        blocked_by: taskDeps.map((d) => d.id),
+        blocked: taskDeps.some((d) => d.status !== "done"),
+        subtasks_total: sub?.total ?? 0,
+        subtasks_done: sub?.done ?? 0,
+        checklist_total: check?.total ?? 0,
+        checklist_done: check?.done ?? 0,
+        tracked_min: Math.round((time?.secs ?? 0) / 60),
+        timer_running: (time?.running ?? 0) > 0,
         workspace_id: ws,
         access,
         can_delete: access === "admin" || (access === "write" && r.user_id === userId),
-        comment_count: (commentStmt.get(r.id) as { n: number }).n,
+        comment_count: comments.get(r.id) ?? 0,
       };
     });
-  };
+  }
 
   /** The task as the caller sees it; 404 if they can't see it. */
-  const getTask = (userId: number, id: number | string) => {
-    const a = readableTask(db, userId, id);
-    return hydrate([a.row], userId)[0] as ReturnType<typeof hydrate>[number] & { due_at: string | null; remind_at: string | null; status: string };
+  const getTask = async (userId: number, id: number, q: Queryable = db) => {
+    const a = await readableTask(q, userId, id);
+    return (await hydrate(q, [a.row], userId))[0] as Awaited<ReturnType<typeof hydrate>>[number] & {
+      due_at: string | null;
+      remind_at: string | null;
+      status: string;
+    };
   };
 
-  const isInSubtree = (id: number, rootId: number) =>
-    !!db
-      .prepare(
-        `WITH RECURSIVE anc(id) AS (
-           SELECT ? UNION ALL SELECT t.parent_id FROM tasks t JOIN anc ON t.id = anc.id WHERE t.parent_id IS NOT NULL)
-         SELECT 1 FROM anc WHERE id = ?`,
-      )
-      .get(id, rootId);
+  const isInSubtree = async (q: Queryable, id: number, rootId: number) =>
+    !!(await q.get(
+      `WITH RECURSIVE anc(id) AS (
+         SELECT CAST(? AS INTEGER) UNION ALL SELECT t.parent_id FROM tasks t JOIN anc ON t.id = anc.id WHERE t.parent_id IS NOT NULL)
+       SELECT 1 FROM anc WHERE id = ?`,
+      id,
+      rootId,
+    ));
 
-  const descendantIds = (rootId: number): number[] =>
+  const descendantIds = async (q: Queryable, rootId: number): Promise<number[]> =>
     (
-      db
-        .prepare(
-          `WITH RECURSIVE d(id) AS (SELECT id FROM tasks WHERE parent_id = ? UNION ALL SELECT t.id FROM tasks t JOIN d ON t.parent_id = d.id)
-           SELECT id FROM d`,
-        )
-        .all(rootId) as { id: number }[]
+      await q.all<{ id: number }>(
+        `WITH RECURSIVE d(id) AS (SELECT id FROM tasks WHERE parent_id = ? UNION ALL SELECT t.id FROM tasks t JOIN d ON t.parent_id = d.id)
+         SELECT id FROM d`,
+        rootId,
+      )
     ).map((r) => r.id);
 
-  const setTags = (userId: number, taskId: number, names: string[]) => {
-    db.prepare("DELETE FROM task_tags WHERE task_id = ?").run(taskId);
+  const setTags = async (q: Queryable, userId: number, taskId: number, names: string[]) => {
+    await q.run("DELETE FROM task_tags WHERE task_id = ?", taskId);
     for (const name of new Set(names.map((n) => n.trim().toLowerCase()).filter(Boolean))) {
-      db.prepare("INSERT OR IGNORE INTO tags (user_id, name) VALUES (?, ?)").run(userId, name);
-      const tag = db.prepare("SELECT id FROM tags WHERE user_id = ? AND name = ?").get(userId, name) as { id: number };
-      db.prepare("INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)").run(taskId, tag.id);
+      await q.run("INSERT INTO tags (user_id, name) VALUES (?, ?) ON CONFLICT DO NOTHING", userId, name);
+      const tag = (await q.get<{ id: number }>("SELECT id FROM tags WHERE user_id = ? AND name = ?", userId, name))!;
+      await q.run("INSERT INTO task_tags (task_id, tag_id) VALUES (?, ?) ON CONFLICT DO NOTHING", taskId, tag.id);
     }
   };
 
-  const assertAssignable = (workspaceId: number | null, assigneeId: number) => {
+  const assertAssignable = async (q: Queryable, workspaceId: number | null, assigneeId: number) => {
     if (workspaceId === null) throw new HttpError(400, "Only tasks in a workspace can be assigned");
-    if (!isMemberAtLeast(db, workspaceId, assigneeId, "member")) throw new HttpError(400, "The assignee must be a member of the workspace");
+    if (!(await isMemberAtLeast(q, workspaceId, assigneeId, "member"))) throw new HttpError(400, "The assignee must be a member of the workspace");
   };
 
   // ---------- projects ----------
-  app.get("/api/projects", auth, (req, res) => {
+  app.get("/api/projects", auth, async (req, res) => {
     res.json(
-      db
-        .prepare(
-          `SELECT ${PROJECT_COLS.replace(/\b(\w+)\b/g, "p.$1")} FROM projects p
-           WHERE (p.workspace_id IS NULL AND p.user_id = ?) OR p.workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id = ?)
-           ORDER BY p.name`,
-        )
-        .all(uid(req), uid(req)),
+      await db.all(
+        `SELECT ${PROJECT_COLS.replace(/\b(\w+)\b/g, "p.$1")} FROM projects p
+         WHERE (p.workspace_id IS NULL AND p.user_id = ?) OR p.workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id = ?)
+         ORDER BY p.name, p.id`,
+        uid(req),
+        uid(req),
+      ),
     );
   });
 
-  app.post("/api/projects", auth, (req, res) => {
+  app.post("/api/projects", auth, async (req, res) => {
     const b = projectBody.partial({ color: true, workspace_id: true }).parse(req.body);
     const me = uid(req);
     if (b.workspace_id != null) {
-      const role = roleIn(db, b.workspace_id, me);
+      const role = await roleIn(db, b.workspace_id, me);
       if (!role) throw new HttpError(404, "Workspace not found");
       if (!atLeast(role, "member")) throw FORBIDDEN();
     }
-    const info = db
-      .prepare("INSERT INTO projects (user_id, name, color, workspace_id) VALUES (?, ?, COALESCE(?, '#4f46e5'), ?)")
-      .run(me, b.name, b.color ?? null, b.workspace_id ?? null);
-    logActivity(db, b.workspace_id ?? null, me, "project_created", null, { name: b.name });
-    res.status(201).json(db.prepare(`SELECT ${PROJECT_COLS} FROM projects WHERE id = ?`).get(info.lastInsertRowid));
+    const id = await db.insert("INSERT INTO projects (user_id, name, color, workspace_id) VALUES (?, ?, COALESCE(?, '#4f46e5'), ?)", me, b.name, b.color ?? null, b.workspace_id ?? null);
+    await logActivity(db, b.workspace_id ?? null, me, "project_created", null, { name: b.name });
+    res.status(201).json(await db.get(`SELECT ${PROJECT_COLS} FROM projects WHERE id = ?`, id));
   });
 
-  app.patch("/api/projects/:id", auth, (req, res) => {
+  app.patch("/api/projects/:id", auth, async (req, res) => {
     const b = projectBody.pick({ name: true, color: true }).partial().parse(req.body);
-    const pa = projectAccess(db, uid(req), Number(req.params.id));
+    const pa = await projectAccess(db, uid(req), parseId(req.params.id, "Project not found"));
     if (!pa) throw new HttpError(404, "Project not found");
     if (pa.workspaceId !== null && !(pa.canManage || (pa.canWrite && pa.creatorId === uid(req)))) throw FORBIDDEN();
-    db.prepare("UPDATE projects SET name = COALESCE(?, name), color = COALESCE(?, color) WHERE id = ?").run(b.name ?? null, b.color ?? null, pa.id);
-    res.json(db.prepare(`SELECT ${PROJECT_COLS} FROM projects WHERE id = ?`).get(pa.id));
+    await db.run("UPDATE projects SET name = COALESCE(?, name), color = COALESCE(?, color) WHERE id = ?", b.name ?? null, b.color ?? null, pa.id);
+    res.json(await db.get(`SELECT ${PROJECT_COLS} FROM projects WHERE id = ?`, pa.id));
   });
 
-  app.delete("/api/projects/:id", auth, (req, res) => {
-    const pa = projectAccess(db, uid(req), Number(req.params.id));
+  app.delete("/api/projects/:id", auth, async (req, res) => {
+    const pa = await projectAccess(db, uid(req), parseId(req.params.id, "Project not found"));
     if (!pa) throw new HttpError(404, "Project not found");
     if (pa.workspaceId !== null) {
       if (!pa.canManage) throw FORBIDDEN();
       // Shared work must not silently become somebody's private task: it is deleted with its project.
-      db.transaction(() => {
-        const n = (db.prepare("SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?").get(pa.id) as { n: number }).n;
-        db.prepare("DELETE FROM tasks WHERE project_id = ?").run(pa.id);
-        db.prepare("DELETE FROM projects WHERE id = ?").run(pa.id);
-        logActivity(db, pa.workspaceId, uid(req), "project_deleted", null, { name: pa.name, tasks: n });
-      })();
+      await db.tx(async (t) => {
+        const n = (await t.get<{ n: number }>("SELECT COUNT(*) AS n FROM tasks WHERE project_id = ?", pa.id))!.n;
+        await t.run("DELETE FROM tasks WHERE project_id = ?", pa.id);
+        await t.run("DELETE FROM projects WHERE id = ?", pa.id);
+        await logActivity(t, pa.workspaceId, uid(req), "project_deleted", null, { name: pa.name, tasks: n });
+      });
     } else {
-      db.prepare("DELETE FROM projects WHERE id = ?").run(pa.id); // private tasks fall back to the inbox
+      await db.run("DELETE FROM projects WHERE id = ?", pa.id); // private tasks fall back to the inbox
     }
     res.status(204).end();
   });
 
   // ---------- tags ----------
-  app.get("/api/tags", auth, (req, res) => {
+  app.get("/api/tags", auth, async (req, res) => {
     // Own tags plus tags on tasks I can see (e.g. added by teammates), one entry per name.
     res.json(
-      db
-        .prepare(
-          `SELECT MIN(id) AS id, name FROM (
-             SELECT id, name FROM tags WHERE user_id = ?
-             UNION
-             SELECT g.id, g.name FROM tags g JOIN task_tags tt ON tt.tag_id = g.id JOIN tasks t ON t.id = tt.task_id WHERE ${visibleTasksSql("t")}
-           ) GROUP BY name ORDER BY name`,
-        )
-        .all(uid(req), ...visibleArgs(uid(req))),
+      await db.all(
+        `SELECT MIN(id) AS id, name FROM (
+           SELECT id, name FROM tags WHERE user_id = ?
+           UNION
+           SELECT g.id, g.name FROM tags g JOIN task_tags tt ON tt.tag_id = g.id JOIN tasks t ON t.id = tt.task_id WHERE ${visibleTasksSql("t")}
+         ) x GROUP BY name ORDER BY name`,
+        uid(req),
+        ...visibleArgs(uid(req)),
+      ),
     );
   });
-  app.delete("/api/tags/:id", auth, (req, res) => {
-    const info = db.prepare("DELETE FROM tags WHERE id = ? AND user_id = ?").run(req.params.id, uid(req));
+  app.delete("/api/tags/:id", auth, async (req, res) => {
+    const info = await db.run("DELETE FROM tags WHERE id = ? AND user_id = ?", parseId(req.params.id, "Tag not found"), uid(req));
     if (!info.changes) throw new HttpError(404, "Tag not found");
     res.status(204).end();
   });
@@ -222,7 +268,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     sort: z.enum(["due", "position"]).optional(),
   });
 
-  app.get("/api/tasks", auth, (req, res) => {
+  app.get("/api/tasks", auth, async (req, res) => {
     const me = uid(req);
     const f = listQuery.parse(req.query);
     const where = [visibleTasksSql("t")];
@@ -243,70 +289,65 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     if (f.priority !== undefined) add("t.priority = ?", f.priority);
     if (f.due_before) add("t.due_at <= ?", f.due_before);
     if (f.due_after) add("t.due_at >= ?", f.due_after);
-    if (f.q) add("(t.title LIKE ? OR t.notes LIKE ?)", `%${f.q}%`, `%${f.q}%`);
+    if (f.q) add(`(${likeCI("t.title")} OR ${likeCI("t.notes")})`, `%${f.q}%`, `%${f.q}%`);
     if (f.tag)
       add("EXISTS (SELECT 1 FROM task_tags tt JOIN tags g ON g.id = tt.tag_id WHERE tt.task_id = t.id AND g.name = ?)", f.tag.toLowerCase());
-    const rows = db
-      .prepare(
-        `SELECT t.* FROM tasks t WHERE ${where.join(" AND ")}
-         ORDER BY ${f.sort === "position" ? "t.position, t.id" : "t.due_at IS NULL, t.due_at, t.priority DESC, t.id"}`,
-      )
-      .all(...args) as TaskRow[];
-    res.json(hydrate(rows, me));
+    const rows = await db.all<TaskRow>(
+      `SELECT t.* FROM tasks t WHERE ${where.join(" AND ")}
+       ORDER BY ${f.sort === "position" ? "t.position, t.id" : "t.due_at IS NULL, t.due_at, t.priority DESC, t.id"}`,
+      ...args,
+    );
+    res.json(await hydrate(db, rows, me));
   });
 
-  app.get("/api/tasks/:id", auth, (req, res) => {
-    res.json(getTask(uid(req), String(req.params.id)));
+  app.get("/api/tasks/:id", auth, async (req, res) => {
+    res.json(await getTask(uid(req), parseId(req.params.id, "Task not found")));
   });
 
-  app.post("/api/tasks", auth, (req, res) => {
+  app.post("/api/tasks", auth, async (req, res) => {
     const me = uid(req);
     const b = taskCreate.parse(req.body);
 
     let projectId = b.project_id ?? null;
     let parent: TaskAccess | null = null;
     if (b.parent_id != null) {
-      parent = taskAccess(db, me, b.parent_id);
+      parent = await taskAccess(db, me, b.parent_id);
       if (!parent || !parent.canWrite) throw new HttpError(400, "Invalid parent_id");
       if (b.project_id === undefined) projectId = parent.row.project_id; // a subtask lives where its parent lives
     }
     let workspaceId: number | null = null;
     if (projectId !== null) {
-      const pa = projectAccess(db, me, projectId);
+      const pa = await projectAccess(db, me, projectId);
       if (!pa) throw new HttpError(400, "Invalid project_id");
       if (!pa.canWrite) throw FORBIDDEN();
       workspaceId = pa.workspaceId;
     }
     if (parent && parent.workspaceId !== workspaceId) throw new HttpError(400, "A subtask must be in the same workspace as its parent");
-    if (b.assignee_id != null) assertAssignable(workspaceId, b.assignee_id);
+    if (b.assignee_id != null) await assertAssignable(db, workspaceId, b.assignee_id);
 
-    const id = db.transaction(() => {
-      const info = db
-        .prepare(
-          `INSERT INTO tasks (user_id, project_id, parent_id, assignee_id, title, notes, priority, status, due_at, remind_at, recurrence_rule, completed_at, position, estimate_min)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE user_id = ?)), ?)`,
-        )
-        .run(
-          me, projectId, b.parent_id ?? null, b.assignee_id ?? null, b.title, b.notes ?? "", b.priority ?? 0, b.status ?? "todo",
-          b.due_at ?? null, b.remind_at ?? null, b.recurrence ? JSON.stringify(b.recurrence) : null,
-          b.status === "done" ? new Date().toISOString() : null, b.position ?? null, me, b.estimate_min ?? null,
-        );
-      const taskId = Number(info.lastInsertRowid);
-      setTags(me, taskId, b.tags ?? []);
-      logActivity(db, workspaceId, me, "task_created", taskId, { title: b.title });
+    const id = await db.tx(async (t) => {
+      const taskId = await t.insert(
+        `INSERT INTO tasks (user_id, project_id, parent_id, assignee_id, title, notes, priority, status, due_at, remind_at, recurrence_rule, completed_at, position, estimate_min)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(CAST(? AS REAL), (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE user_id = ?)), ?)`,
+        me, projectId, b.parent_id ?? null, b.assignee_id ?? null, b.title, b.notes ?? "", b.priority ?? 0, b.status ?? "todo",
+        b.due_at ?? null, b.remind_at ?? null, b.recurrence ? JSON.stringify(b.recurrence) : null,
+        b.status === "done" ? new Date().toISOString() : null, b.position ?? null, me, b.estimate_min ?? null,
+      );
+      await setTags(t, me, taskId, b.tags ?? []);
+      await logActivity(t, workspaceId, me, "task_created", taskId, { title: b.title });
       if (b.assignee_id != null) {
-        logActivity(db, workspaceId, me, "task_assigned", taskId, { title: b.title, assignee_id: b.assignee_id });
-        notify(db, { userId: b.assignee_id, kind: "assigned", actorId: me, taskId, workspaceId, title: b.title });
+        await logActivity(t, workspaceId, me, "task_assigned", taskId, { title: b.title, assignee_id: b.assignee_id });
+        await notify(t, { userId: b.assignee_id, kind: "assigned", actorId: me, taskId, workspaceId, title: b.title });
       }
       return taskId;
-    })();
-    res.status(201).json(getTask(me, id));
+    });
+    res.status(201).json(await getTask(me, id));
   });
 
-  app.patch("/api/tasks/:id", auth, (req, res) => {
+  app.patch("/api/tasks/:id", auth, async (req, res) => {
     const me = uid(req);
     const b = taskUpdate.parse(req.body);
-    const ta = writableTask(db, me, String(req.params.id));
+    const ta = await writableTask(db, me, parseId(req.params.id, "Task not found"));
     const current = ta.row;
     const taskId = current.id;
 
@@ -318,7 +359,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
         newProject = null;
         newWs = null;
       } else {
-        const pa = projectAccess(db, me, b.project_id);
+        const pa = await projectAccess(db, me, b.project_id);
         if (!pa) throw new HttpError(400, "Invalid project_id");
         if (!pa.canWrite) throw FORBIDDEN();
         newProject = pa.id;
@@ -331,22 +372,22 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
 
     let newParent = b.parent_id === undefined ? current.parent_id : b.parent_id;
     if (b.parent_id != null) {
-      const pa = taskAccess(db, me, b.parent_id);
+      const pa = await taskAccess(db, me, b.parent_id);
       if (!pa || !pa.canWrite) throw new HttpError(400, "Invalid parent_id");
       if (pa.workspaceId !== newWs) throw new HttpError(400, "A subtask must be in the same workspace as its parent");
-      if (isInSubtree(b.parent_id, taskId)) throw new HttpError(400, "A task cannot be moved under itself or its own subtasks");
+      if (await isInSubtree(db, b.parent_id, taskId)) throw new HttpError(400, "A task cannot be moved under itself or its own subtasks");
     }
     if (scopeChange && b.parent_id === undefined && current.parent_id !== null) newParent = null; // leaves its parent behind
 
-    const current_ = getTask(me, taskId);
-    if (b.status === "done" && current.status !== "done" && current_.blocked) throw new HttpError(409, "Task is blocked by unfinished tasks");
+    const before = await getTask(me, taskId);
+    if (b.status === "done" && current.status !== "done" && before.blocked) throw new HttpError(409, "Task is blocked by unfinished tasks");
 
     let newAssignee = b.assignee_id === undefined ? current.assignee_id : b.assignee_id;
-    if (b.assignee_id != null) assertAssignable(newWs, b.assignee_id);
+    if (b.assignee_id != null) await assertAssignable(db, newWs, b.assignee_id);
     // An assignee who isn't in the destination workspace can't keep the task.
-    if (scopeChange && b.assignee_id === undefined && newAssignee !== null && !(newWs !== null && isMemberAtLeast(db, newWs, newAssignee, "member"))) newAssignee = null;
+    if (scopeChange && b.assignee_id === undefined && newAssignee !== null && !(newWs !== null && (await isMemberAtLeast(db, newWs, newAssignee, "member")))) newAssignee = null;
 
-    db.transaction(() => {
+    await db.tx(async (t) => {
       const sets: string[] = [];
       const args: unknown[] = [];
       const set = (col: string, val: unknown) => {
@@ -366,95 +407,92 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
       }
       if (b.recurrence !== undefined) set("recurrence_rule", b.recurrence ? JSON.stringify(b.recurrence) : null);
       if (b.status !== undefined) set("completed_at", b.status === "done" ? new Date().toISOString() : null);
-      if (sets.length) db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`).run(...args, taskId);
-      if (b.tags) setTags(me, taskId, b.tags);
+      if (sets.length) await t.run(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`, ...args, taskId);
+      if (b.tags) await setTags(t, me, taskId, b.tags);
 
       if (scopeChange) {
         // Subtasks travel with their parent, and nothing may keep a link across the new boundary.
-        const family = [taskId, ...descendantIds(taskId)];
-        const marks = family.map(() => "?").join(",");
-        db.prepare(`UPDATE tasks SET project_id = ? WHERE id IN (${marks})`).run(newProject, ...family);
+        const family = [taskId, ...(await descendantIds(t, taskId))];
+        const m = family.map(() => "?").join(",");
+        await t.run(`UPDATE tasks SET project_id = ? WHERE id IN (${m})`, newProject, ...family);
         // Subtasks lose their assignees: those people may not be in the destination.
-        db.prepare(`UPDATE tasks SET assignee_id = NULL WHERE id IN (${marks}) AND id != ?`).run(...family, taskId);
-        const outside = db
-          .prepare(
-            `SELECT d.task_id, d.blocked_by_id FROM task_deps d
-             WHERE (d.task_id IN (${marks}) AND d.blocked_by_id NOT IN (${marks})) OR (d.blocked_by_id IN (${marks}) AND d.task_id NOT IN (${marks}))`,
-          )
-          .all(...family, ...family, ...family, ...family) as { task_id: number; blocked_by_id: number }[];
-        for (const d of outside) db.prepare("DELETE FROM task_deps WHERE task_id = ? AND blocked_by_id = ?").run(d.task_id, d.blocked_by_id);
+        await t.run(`UPDATE tasks SET assignee_id = NULL WHERE id IN (${m}) AND id != ?`, ...family, taskId);
+        const outside = await t.all<{ task_id: number; blocked_by_id: number }>(
+          `SELECT d.task_id, d.blocked_by_id FROM task_deps d
+           WHERE (d.task_id IN (${m}) AND d.blocked_by_id NOT IN (${m})) OR (d.blocked_by_id IN (${m}) AND d.task_id NOT IN (${m}))`,
+          ...family, ...family, ...family, ...family,
+        );
+        for (const d of outside) await t.run("DELETE FROM task_deps WHERE task_id = ? AND blocked_by_id = ?", d.task_id, d.blocked_by_id);
         const title = (b.title ?? current.title) as string;
-        logActivity(db, ta.workspaceId, me, "task_moved", taskId, { title, away: true });
-        logActivity(db, newWs, me, "task_moved", taskId, { title });
+        await logActivity(t, ta.workspaceId, me, "task_moved", taskId, { title, away: true });
+        await logActivity(t, newWs, me, "task_moved", taskId, { title });
       }
 
       const title = (b.title ?? current.title) as string;
       if (b.status !== undefined && b.status !== current.status) {
-        if (b.status === "done") logActivity(db, newWs, me, "task_completed", taskId, { title });
-        else if (current.status === "done") logActivity(db, newWs, me, "task_reopened", taskId, { title });
+        if (b.status === "done") await logActivity(t, newWs, me, "task_completed", taskId, { title });
+        else if (current.status === "done") await logActivity(t, newWs, me, "task_reopened", taskId, { title });
       }
       if (newAssignee !== current.assignee_id) {
-        if (newAssignee === null) logActivity(db, newWs, me, "task_unassigned", taskId, { title, assignee_id: current.assignee_id });
+        if (newAssignee === null) await logActivity(t, newWs, me, "task_unassigned", taskId, { title, assignee_id: current.assignee_id });
         else {
-          logActivity(db, newWs, me, "task_assigned", taskId, { title, assignee_id: newAssignee });
-          notify(db, { userId: newAssignee, kind: "assigned", actorId: me, taskId, workspaceId: newWs, title });
+          await logActivity(t, newWs, me, "task_assigned", taskId, { title, assignee_id: newAssignee });
+          await notify(t, { userId: newAssignee, kind: "assigned", actorId: me, taskId, workspaceId: newWs, title });
         }
       }
-    })();
-    res.json(getTask(me, taskId));
+    });
+    res.json(await getTask(me, taskId));
   });
 
-  app.delete("/api/tasks/:id", auth, (req, res) => {
-    const ta = readableTask(db, uid(req), String(req.params.id));
+  app.delete("/api/tasks/:id", auth, async (req, res) => {
+    const ta = await readableTask(db, uid(req), parseId(req.params.id, "Task not found"));
     if (!ta.canDelete) throw FORBIDDEN();
-    db.transaction(() => {
-      logActivity(db, ta.workspaceId, uid(req), "task_deleted", ta.row.id, { title: ta.row.title });
-      db.prepare("DELETE FROM tasks WHERE id = ?").run(ta.row.id);
-    })();
+    await db.tx(async (t) => {
+      await logActivity(t, ta.workspaceId, uid(req), "task_deleted", ta.row.id, { title: ta.row.title });
+      await t.run("DELETE FROM tasks WHERE id = ?", ta.row.id);
+    });
     res.status(204).end();
   });
 
-  app.post("/api/tasks/:id/complete", auth, (req, res) => {
+  app.post("/api/tasks/:id/complete", auth, async (req, res) => {
     const me = uid(req);
-    const ta = writableTask(db, me, String(req.params.id));
-    const task = getTask(me, ta.row.id);
+    const ta = await writableTask(db, me, parseId(req.params.id, "Task not found"));
+    const task = await getTask(me, ta.row.id);
     if (task.status === "done") throw new HttpError(409, "Task already completed");
     if (task.blocked) throw new HttpError(409, "Task is blocked by unfinished tasks");
-    const nextId = db.transaction(() => {
-      db.prepare("UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?").run(new Date().toISOString(), task.id);
-      logActivity(db, ta.workspaceId, me, "task_completed", task.id, { title: task.title });
+    const nextId = await db.tx(async (t) => {
+      await t.run("UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?", new Date().toISOString(), task.id);
+      await logActivity(t, ta.workspaceId, me, "task_completed", task.id, { title: task.title });
       if (!task.recurrence) return null;
       const due = nextOccurrence(task.due_at ?? new Date().toISOString(), task.recurrence);
       const lead = task.remind_at && task.due_at ? Date.parse(task.due_at) - Date.parse(task.remind_at) : null;
       const remind = lead !== null ? new Date(Date.parse(due) - lead).toISOString() : null;
-      const info = db
-        .prepare(
-          `INSERT INTO tasks (user_id, project_id, parent_id, assignee_id, title, notes, priority, status, due_at, remind_at, recurrence_rule, position, estimate_min)
-           SELECT user_id, project_id, parent_id, assignee_id, title, notes, priority, 'todo', ?, ?, recurrence_rule, position, estimate_min FROM tasks WHERE id = ?`,
-        )
-        .run(due, remind, task.id);
-      setTags(me, Number(info.lastInsertRowid), task.tags);
-      return Number(info.lastInsertRowid);
-    })();
-    res.json({ completed: getTask(me, task.id), next: nextId ? getTask(me, nextId) : null });
+      const spawned = await t.insert(
+        `INSERT INTO tasks (user_id, project_id, parent_id, assignee_id, title, notes, priority, status, due_at, remind_at, recurrence_rule, position, estimate_min)
+         SELECT user_id, project_id, parent_id, assignee_id, title, notes, priority, 'todo', CAST(? AS TEXT), CAST(? AS TEXT), recurrence_rule, position, estimate_min FROM tasks WHERE id = ?`,
+        due, remind, task.id,
+      );
+      await setTags(t, me, spawned, task.tags);
+      return spawned;
+    });
+    res.json({ completed: await getTask(me, task.id), next: nextId ? await getTask(me, nextId) : null });
   });
 
   // ---------- reminders (fired, not yet dismissed): for the assignee, or the author when nobody is assigned ----------
-  app.get("/api/notifications", auth, (req, res) => {
+  app.get("/api/notifications", auth, async (req, res) => {
     res.json(
-      db
-        .prepare(
-          `SELECT t.id, t.title, t.due_at, t.remind_at FROM tasks t
-           WHERE ${visibleTasksSql("t")} AND (t.assignee_id = ? OR (t.assignee_id IS NULL AND t.user_id = ?))
-             AND t.status != 'done' AND t.reminded_at IS NOT NULL AND t.ack = 0
-           ORDER BY t.remind_at`,
-        )
-        .all(...visibleArgs(uid(req)), uid(req), uid(req)),
+      await db.all(
+        `SELECT t.id, t.title, t.due_at, t.remind_at FROM tasks t
+         WHERE ${visibleTasksSql("t")} AND (t.assignee_id = ? OR (t.assignee_id IS NULL AND t.user_id = ?))
+           AND t.status != 'done' AND t.reminded_at IS NOT NULL AND t.ack = 0
+         ORDER BY t.remind_at`,
+        ...visibleArgs(uid(req)), uid(req), uid(req),
+      ),
     );
   });
-  app.post("/api/notifications/:id/ack", auth, (req, res) => {
-    const ta = readableTask(db, uid(req), String(req.params.id));
-    db.prepare("UPDATE tasks SET ack = 1 WHERE id = ?").run(ta.row.id);
+  app.post("/api/notifications/:id/ack", auth, async (req, res) => {
+    const ta = await readableTask(db, uid(req), parseId(req.params.id, "Task not found"));
+    await db.run("UPDATE tasks SET ack = 1 WHERE id = ?", ta.row.id);
     res.status(204).end();
   });
 

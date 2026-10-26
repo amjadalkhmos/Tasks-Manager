@@ -4,7 +4,7 @@ import type { Express, Request, RequestHandler } from "express";
 import { z } from "zod";
 import { myArgs, myTasksSql, readableTask } from "./access.js";
 import type { DB } from "./db.js";
-import { HttpError } from "./http-error.js";
+import { HttpError, parseId } from "./http-error.js";
 
 export interface PlanTask {
   id: number;
@@ -120,12 +120,9 @@ export function registerAi(app: Express, { db, auth, uid, ai }: Deps) {
 
   app.post("/api/tasks/:id/ai/breakdown", auth, async (req, res) => {
     const model = needAi();
-    const access = readableTask(db, uid(req), String(req.params.id));
-    const task = {
-      title: access.row.title,
-      notes: String(access.row.notes ?? ""),
-      project: (db.prepare("SELECT name FROM projects WHERE id = ?").get(access.row.project_id ?? -1) as { name: string } | undefined)?.name ?? null,
-    };
+    const access = await readableTask(db, uid(req), parseId(req.params.id, "Task not found"));
+    const project = access.row.project_id === null ? undefined : await db.get<{ name: string }>("SELECT name FROM projects WHERE id = ?", access.row.project_id);
+    const task = { title: access.row.title, notes: String(access.row.notes ?? ""), project: project?.name ?? null };
     throttle(uid(req));
     const subtasks = (await model.breakdown(task))
       .map((s) => s.trim().slice(0, 500))
@@ -139,14 +136,13 @@ export function registerAi(app: Express, { db, auth, uid, ai }: Deps) {
   app.post("/api/ai/plan-day", auth, async (req, res) => {
     const model = needAi();
     const { tz } = planQuery.parse(req.query);
-    const tasks = db
-      .prepare(
-        `SELECT t.id, t.title, t.priority, t.due_at, t.estimate_min,
-                EXISTS (SELECT 1 FROM task_deps d JOIN tasks b ON b.id = d.blocked_by_id WHERE d.task_id = t.id AND b.status != 'done') AS blocked
-         FROM tasks t WHERE ${myTasksSql("t")} AND t.status != 'done'
-         ORDER BY t.due_at IS NULL, t.due_at, t.priority DESC, t.id LIMIT 60`,
-      )
-      .all(...myArgs(uid(req))) as (Omit<PlanTask, "blocked"> & { blocked: number })[];
+    const tasks = await db.all<Omit<PlanTask, "blocked"> & { blocked: unknown }>(
+      `SELECT t.id, t.title, t.priority, t.due_at, t.estimate_min,
+              EXISTS (SELECT 1 FROM task_deps d JOIN tasks b ON b.id = d.blocked_by_id WHERE d.task_id = t.id AND b.status != 'done') AS blocked
+       FROM tasks t WHERE ${myTasksSql("t")} AND t.status != 'done'
+       ORDER BY t.due_at IS NULL, t.due_at, t.priority DESC, t.id LIMIT 60`,
+      ...myArgs(uid(req)),
+    );
     if (tasks.length === 0) return void res.json({ summary: "You have no open tasks — nothing to plan.", order: [] });
 
     throttle(uid(req));

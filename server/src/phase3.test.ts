@@ -3,7 +3,8 @@ import request from "supertest";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { z } from "zod";
 import { createApp } from "./app.js";
-import { openDb, type DB } from "./db.js";
+import type { DB } from "./db.js";
+import { testDb } from "./test-db.js";
 import { parseCsv, toCsv } from "./csv.js";
 import type { AiClient } from "./ai.js";
 import { GoogleAuthError, type EventBody, type GEvent, type GmailMessage, type GoogleApi } from "./google.js";
@@ -40,7 +41,7 @@ describe("export and import", () => {
   let app: App;
   let agent: Agent;
   beforeEach(async () => {
-    app = createApp(openDb(":memory:"), "s");
+    app = createApp(await testDb(), "s");
     agent = await login(app);
   });
 
@@ -188,7 +189,7 @@ describe("AI endpoints", () => {
   });
 
   it("reports disabled state and refuses to run without a client", async () => {
-    const app = createApp(openDb(":memory:"), "s");
+    const app = createApp(await testDb(), "s");
     const agent = await login(app);
     expect((await agent.get("/api/ai/status")).body).toEqual({ enabled: false });
     const t = await mk(agent, { title: "x" });
@@ -198,7 +199,7 @@ describe("AI endpoints", () => {
 
   it("suggests cleaned, capped subtasks without creating them, only for the owner", async () => {
     const ai = fake();
-    const app = createApp(openDb(":memory:"), "s", { ai });
+    const app = createApp(await testDb(), "s", { ai });
     const agent = await login(app);
     const t = await mk(agent, { title: "Write report" });
     expect((await agent.get("/api/ai/status")).body.enabled).toBe(true);
@@ -212,7 +213,7 @@ describe("AI endpoints", () => {
 
   it("plans the day using only the person's own open tasks, dropping invented or repeated ids", async () => {
     const ai = fake();
-    const app = createApp(openDb(":memory:"), "s", { ai });
+    const app = createApp(await testDb(), "s", { ai });
     const agent = await login(app);
     await agent.post("/api/ai/plan-day").expect(200).then((r) => expect(r.body.order).toEqual([]));
     expect(ai.calls).toEqual([]); // no tasks → no model call
@@ -223,7 +224,7 @@ describe("AI endpoints", () => {
   });
 
   it("rate limits per person", async () => {
-    const app = createApp(openDb(":memory:"), "s", { ai: fake() });
+    const app = createApp(await testDb(), "s", { ai: fake() });
     const agent = await login(app);
     const t = await mk(agent, { title: "x" });
     for (let i = 0; i < 20; i++) await agent.post(`/api/tasks/${t.id}/ai/breakdown`).expect(200);
@@ -315,7 +316,7 @@ describe("Google integration", () => {
   const sync = (tz = 0) => agent.post(`/api/integrations/google/sync?tz=${tz}`);
 
   beforeEach(async () => {
-    db = openDb(":memory:");
+    db = await testDb();
     google = new FakeGoogle();
     app = createApp(db, "s", { google });
     agent = await login(app);
@@ -323,7 +324,7 @@ describe("Google integration", () => {
   });
 
   it("is unavailable when not configured", async () => {
-    const bare = createApp(openDb(":memory:"), "s");
+    const bare = createApp(await testDb(), "s");
     const a = await login(bare);
     expect((await a.get("/api/integrations")).body.google).toMatchObject({ configured: false, connected: false });
     await a.get("/api/integrations/google/connect").expect(503);
@@ -331,7 +332,7 @@ describe("Google integration", () => {
 
   it("connects via a signed state, stores tokens encrypted, and can disconnect", async () => {
     await connect().then((r) => expect(r.headers.location).toBe("/settings?google=connected"));
-    const stored = (db.prepare("SELECT tokens_enc, account FROM integrations").get() as { tokens_enc: string; account: string });
+    const stored = (await db.get<{ tokens_enc: string; account: string }>("SELECT tokens_enc, account FROM integrations"))!;
     expect(stored.account).toBe("me@gmail.test");
     expect(stored.tokens_enc).not.toContain("ref-1");
     expect(decrypt(makeKey(undefined, "s"), stored.tokens_enc)).toContain("ref-1");
@@ -351,7 +352,7 @@ describe("Google integration", () => {
     const okState = jwt.sign({ sub: userId, purpose: "google-connect" }, "s");
     expect((await request(app).get(`/api/integrations/google/callback?code=bad&state=${okState}`)).headers.location).toBe("/settings?google=error");
     expect((await request(app).get("/api/integrations/google/callback?error=access_denied")).headers.location).toBe("/settings?google=error");
-    expect(db.prepare("SELECT COUNT(*) n FROM integrations").get()).toEqual({ n: 0 });
+    expect(await db.get("SELECT COUNT(*) AS n FROM integrations")).toEqual({ n: 0 });
     await sync().expect(404);
   });
 

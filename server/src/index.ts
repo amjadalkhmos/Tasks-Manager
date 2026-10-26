@@ -11,7 +11,11 @@ import { createGoogleApi, googleConfigFromEnv } from "./google.js";
 const secret = process.env.JWT_SECRET;
 if (!secret && process.env.NODE_ENV === "production") throw new Error("JWT_SECRET must be set in production");
 
-const db = openDb(process.env.DB_FILE ?? "tasks.db");
+// PostgreSQL when DATABASE_URL is set (hosts such as Railway provide it); otherwise a SQLite file.
+const target = process.env.DATABASE_URL || process.env.DB_FILE || "tasks.db";
+const db = await openDb(target);
+console.log(`Database: ${db.dialect === "postgres" ? "PostgreSQL" : `SQLite (${target})`}`);
+
 const googleConfig = googleConfigFromEnv(process.env);
 if (googleConfig && process.env.NODE_ENV === "production" && !process.env.TOKEN_ENC_KEY)
   throw new Error("TOKEN_ENC_KEY (base64, 32 bytes) must be set when Google integration is enabled in production");
@@ -39,6 +43,22 @@ if (existsSync(webDist)) {
   );
 }
 
-startReminderJob(db);
+const reminders = startReminderJob(db);
 const port = Number(process.env.PORT ?? 3000);
-app.listen(port, () => console.log(`API listening on http://localhost:${port}`));
+const server = app.listen(port, () => console.log(`API listening on http://localhost:${port}`));
+
+// Hosts stop a container with SIGTERM on every deploy: finish in-flight requests, then close the database cleanly.
+let stopping = false;
+const shutdown = (signal: string) => {
+  if (stopping) return;
+  stopping = true;
+  console.log(`${signal} received, shutting down`);
+  void reminders.stop();
+  server.close(async () => {
+    await db.close().catch(() => undefined);
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 10_000).unref(); // don't hang forever on a stuck connection
+};
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "./app.js";
-import { openDb } from "./db.js";
+import { testDb } from "./test-db.js";
 import { fireDueReminders } from "./reminders.js";
 import { nextOccurrence } from "./recurrence.js";
 
-function setup() {
-  const db = openDb(":memory:");
+async function setup() {
+  const db = await testDb();
   return { db, app: createApp(db, "test-secret") };
 }
 
@@ -18,14 +18,14 @@ async function login(app: ReturnType<typeof createApp>, email = "a@example.com")
 
 describe("auth", () => {
   it("rejects unauthenticated access and duplicate emails", async () => {
-    const { app } = setup();
+    const { app } = await setup();
     await request(app).get("/api/tasks").expect(401);
     await login(app);
     await request(app).post("/api/auth/register").send({ email: "a@example.com", password: "password123" }).expect(409);
   });
 
   it("logs in with correct password only", async () => {
-    const { app } = setup();
+    const { app } = await setup();
     await login(app);
     await request(app).post("/api/auth/login").send({ email: "a@example.com", password: "wrong-password" }).expect(401);
     await request(app).post("/api/auth/login").send({ email: "a@example.com", password: "password123" }).expect(200);
@@ -36,7 +36,7 @@ describe("tasks", () => {
   let app: ReturnType<typeof createApp>;
   let agent: ReturnType<typeof request.agent>;
   beforeEach(async () => {
-    ({ app } = setup());
+    ({ app } = await setup());
     agent = await login(app);
   });
 
@@ -91,13 +91,13 @@ describe("tasks", () => {
 
 describe("reminders", () => {
   it("fires due reminders once and exposes them as notifications", async () => {
-    const { app, db } = setup();
+    const { app, db } = await setup();
     const agent = await login(app);
     await agent.post("/api/tasks").send({ title: "Call", remind_at: "2026-01-01T10:00:00.000Z" }).expect(201);
     await agent.post("/api/tasks").send({ title: "Later", remind_at: "2027-01-01T10:00:00.000Z" }).expect(201);
 
-    expect(fireDueReminders(db, new Date("2026-06-01T00:00:00Z"))).toBe(1);
-    expect(fireDueReminders(db, new Date("2026-06-01T00:01:00Z"))).toBe(0);
+    expect(await fireDueReminders(db, new Date("2026-06-01T00:00:00Z"))).toBe(1);
+    expect(await fireDueReminders(db, new Date("2026-06-01T00:01:00Z"))).toBe(0);
 
     const { body } = await agent.get("/api/notifications").expect(200);
     expect(body.map((n: { title: string }) => n.title)).toEqual(["Call"]);
@@ -119,7 +119,7 @@ describe("nextOccurrence", () => {
 
 describe("health", () => {
   it("answers without a login, for uptime checks", async () => {
-    const { app } = setup();
+    const { app } = await setup();
     expect((await request(app).get("/api/health").expect(200)).body).toEqual({ ok: true });
   });
 });

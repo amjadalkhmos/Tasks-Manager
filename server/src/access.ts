@@ -1,4 +1,4 @@
-import type { DB } from "./db.js";
+import type { Queryable } from "./db.js";
 import { HttpError } from "./http-error.js";
 
 /**
@@ -23,16 +23,14 @@ export const atLeast = (role: Role | null | undefined, min: Role): boolean => !!
 
 export const FORBIDDEN = () => new HttpError(403, "You don't have permission to do that");
 
-export function roleIn(db: DB, workspaceId: number, userId: number): Role | null {
-  const r = db.prepare("SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?").get(workspaceId, userId) as
-    | { role: Role }
-    | undefined;
+export async function roleIn(db: Queryable, workspaceId: number, userId: number): Promise<Role | null> {
+  const r = await db.get<{ role: Role }>("SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?", workspaceId, userId);
   return r?.role ?? null;
 }
 
 /** The caller's role in a workspace; 404 if they aren't a member, 403 if their role is too low. */
-export function requireRole(db: DB, workspaceId: number, userId: number, min: Role): Role {
-  const role = roleIn(db, workspaceId, userId);
+export async function requireRole(db: Queryable, workspaceId: number, userId: number, min: Role): Promise<Role> {
+  const role = await roleIn(db, workspaceId, userId);
   if (!role) throw new HttpError(404, "Workspace not found");
   if (!atLeast(role, min)) throw FORBIDDEN();
   return role;
@@ -48,20 +46,21 @@ export interface ProjectAccess {
   canManage: boolean;
 }
 
-export function projectAccess(db: DB, userId: number, projectId: number): ProjectAccess | null {
-  const p = db.prepare("SELECT id, name, user_id, workspace_id FROM projects WHERE id = ?").get(projectId) as
-    | { id: number; name: string; user_id: number; workspace_id: number | null }
-    | undefined;
+export async function projectAccess(db: Queryable, userId: number, projectId: number): Promise<ProjectAccess | null> {
+  const p = await db.get<{ id: number; name: string; user_id: number; workspace_id: number | null }>(
+    "SELECT id, name, user_id, workspace_id FROM projects WHERE id = ?",
+    projectId,
+  );
   if (!p) return null;
   const base = { id: p.id, name: p.name, creatorId: p.user_id, workspaceId: p.workspace_id };
   if (p.workspace_id === null) {
     return p.user_id === userId ? { ...base, role: null, canWrite: true, canManage: true } : null;
   }
-  const role = roleIn(db, p.workspace_id, userId);
+  const role = await roleIn(db, p.workspace_id, userId);
   return role ? { ...base, role, canWrite: atLeast(role, "member"), canManage: atLeast(role, "admin") } : null;
 }
 
-export type TaskRow = Record<string, unknown> & {
+export type TaskRow = Record<string, any> & {
   id: number;
   user_id: number;
   project_id: number | null;
@@ -81,17 +80,19 @@ export interface TaskAccess {
   canManage: boolean;
 }
 
-export function taskAccess(db: DB, userId: number, taskId: number | string): TaskAccess | null {
-  const row = db
-    .prepare("SELECT t.*, p.workspace_id AS ws FROM tasks t LEFT JOIN projects p ON p.id = t.project_id WHERE t.id = ?")
-    .get(taskId) as (TaskRow & { ws: number | null }) | undefined;
+export async function taskAccess(db: Queryable, userId: number, taskId: number): Promise<TaskAccess | null> {
+  if (!Number.isSafeInteger(taskId)) return null;
+  const row = await db.get<TaskRow & { ws: number | null }>(
+    "SELECT t.*, p.workspace_id AS ws FROM tasks t LEFT JOIN projects p ON p.id = t.project_id WHERE t.id = ?",
+    taskId,
+  );
   if (!row) return null;
   const { ws, ...task } = row;
   if (ws === null) {
     // Private task: only its creator.
     return task.user_id === userId ? { row: task as TaskRow, workspaceId: null, role: null, canWrite: true, canDelete: true, canManage: true } : null;
   }
-  const role = roleIn(db, ws, userId);
+  const role = await roleIn(db, ws, userId);
   if (!role) return null;
   return {
     row: task as TaskRow,
@@ -104,15 +105,15 @@ export function taskAccess(db: DB, userId: number, taskId: number | string): Tas
 }
 
 /** Task the caller can at least read, else 404. */
-export function readableTask(db: DB, userId: number, taskId: number | string): TaskAccess {
-  const a = taskAccess(db, userId, taskId);
+export async function readableTask(db: Queryable, userId: number, taskId: number): Promise<TaskAccess> {
+  const a = await taskAccess(db, userId, taskId);
   if (!a) throw new HttpError(404, "Task not found");
   return a;
 }
 
 /** Task the caller can edit: 404 if invisible, 403 if read-only. */
-export function writableTask(db: DB, userId: number, taskId: number | string): TaskAccess {
-  const a = readableTask(db, userId, taskId);
+export async function writableTask(db: Queryable, userId: number, taskId: number): Promise<TaskAccess> {
+  const a = await readableTask(db, userId, taskId);
   if (!a.canWrite) throw FORBIDDEN();
   return a;
 }
@@ -124,12 +125,12 @@ export function visibleTasksSql(alias = "t"): string {
 }
 export const visibleArgs = (userId: number): [number, number] => [userId, userId];
 
-/** Tasks that are "mine": ones I made or that are assigned to me, and that I can still see. Three placeholders (all the user id). */
+/** Tasks that are "mine": ones I made or that are assigned to me, and that I can still see. Four placeholders (all the user id). */
 export function myTasksSql(alias = "t"): string {
   return `(${visibleTasksSql(alias)} AND (${alias}.user_id = ? OR ${alias}.assignee_id = ?))`;
 }
 export const myArgs = (userId: number): number[] => [userId, userId, userId, userId];
 
-export function isMemberAtLeast(db: DB, workspaceId: number, userId: number, min: Role): boolean {
-  return atLeast(roleIn(db, workspaceId, userId), min);
+export async function isMemberAtLeast(db: Queryable, workspaceId: number, userId: number, min: Role): Promise<boolean> {
+  return atLeast(await roleIn(db, workspaceId, userId), min);
 }

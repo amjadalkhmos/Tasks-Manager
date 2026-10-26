@@ -12,7 +12,7 @@ import { registerAi, type AiClient } from "./ai.js";
 import { registerGoogle, type GoogleApi } from "./google.js";
 import { registerTasks } from "./tasks.js";
 import { registerCollab } from "./collab.js";
-import { displayNameSql } from "./events.js";
+import { displayName } from "./dialect.js";
 import { makeKey } from "./secrets.js";
 
 const credentials = z.object({ email: z.string().email(), password: z.string().min(8) });
@@ -43,43 +43,49 @@ export function createApp(db: DB, secret: string, options: AppOptions = {}) {
     });
 
   const profile = (userId: number) =>
-    db.prepare(`SELECT u.id, u.email, ${displayNameSql("u")} AS name FROM users u WHERE u.id = ?`).get(userId) as { id: number; email: string; name: string };
+    db.get<{ id: number; email: string; name: string }>(`SELECT u.id, u.email, ${displayName(db.dialect, "u")} AS name FROM users u WHERE u.id = ?`, userId);
 
   // ---------- auth ----------
-  app.post("/api/auth/register", (req, res) => {
+  app.post("/api/auth/register", async (req, res) => {
     const { email, password, name } = registration.parse(req.body);
     const lower = email.toLowerCase();
-    if (db.prepare("SELECT 1 FROM users WHERE email = ?").get(lower)) throw new HttpError(409, "Email already registered");
-    const info = db
-      .prepare("INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)")
-      .run(lower, bcrypt.hashSync(password, Number(process.env.BCRYPT_ROUNDS ?? 10)), name || null);
-    setSession(res, Number(info.lastInsertRowid));
-    res.status(201).json(profile(Number(info.lastInsertRowid)));
+    if (await db.get("SELECT 1 FROM users WHERE email = ?", lower)) throw new HttpError(409, "Email already registered");
+    const hash = await bcrypt.hash(password, Number(process.env.BCRYPT_ROUNDS ?? 10));
+    let userId: number;
+    try {
+      userId = await db.insert("INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)", lower, hash, name || null);
+    } catch (e) {
+      // Two sign-ups with the same address can pass the check above together; the unique index settles it.
+      if (/unique|duplicate/i.test(e instanceof Error ? e.message : "")) throw new HttpError(409, "Email already registered");
+      throw e;
+    }
+    setSession(res, userId);
+    res.status(201).json(await profile(userId));
   });
 
-  app.post("/api/auth/login", (req, res) => {
+  app.post("/api/auth/login", async (req, res) => {
     const { email, password } = credentials.parse(req.body);
     const lower = email.toLowerCase();
-    const user = db.prepare("SELECT id, password_hash FROM users WHERE email = ?").get(lower) as
-      | { id: number; password_hash: string }
-      | undefined;
-    if (!user || !bcrypt.compareSync(password, user.password_hash)) throw new HttpError(401, "Invalid credentials");
+    const user = await db.get<{ id: number; password_hash: string }>("SELECT id, password_hash FROM users WHERE email = ?", lower);
+    if (!user || !(await bcrypt.compare(password, user.password_hash))) throw new HttpError(401, "Invalid credentials");
     setSession(res, user.id);
-    res.json(profile(user.id));
+    res.json(await profile(user.id));
   });
 
   app.post("/api/auth/logout", (_req, res) => {
     res.clearCookie(COOKIE).status(204).end();
   });
 
-  app.get("/api/auth/me", auth, (req, res) => {
-    res.json(profile(uid(req)));
+  app.get("/api/auth/me", auth, async (req, res) => {
+    const me = await profile(uid(req));
+    if (!me) return void res.status(401).json({ error: "Not authenticated" }); // the account was deleted
+    res.json(me);
   });
 
-  app.patch("/api/auth/me", auth, (req, res) => {
+  app.patch("/api/auth/me", auth, async (req, res) => {
     const { name } = z.object({ name: z.string().trim().max(60) }).parse(req.body);
-    db.prepare("UPDATE users SET name = ? WHERE id = ?").run(name || null, uid(req));
-    res.json(profile(uid(req)));
+    await db.run("UPDATE users SET name = ? WHERE id = ?", name || null, uid(req));
+    res.json(await profile(uid(req)));
   });
 
   const { getTask } = registerTasks(app, { db, auth, uid });
@@ -90,8 +96,8 @@ export function createApp(db: DB, secret: string, options: AppOptions = {}) {
   registerCollab(app, { db, auth, uid });
 
   // For load balancers and uptime checks: confirms the process is up and the database answers.
-  app.get("/api/health", (_req, res) => {
-    db.prepare("SELECT 1").get();
+  app.get("/api/health", async (_req, res) => {
+    await db.get("SELECT 1");
     res.json({ ok: true });
   });
 

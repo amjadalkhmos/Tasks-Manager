@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "./app.js";
-import { openDb } from "./db.js";
+import { testDb } from "./test-db.js";
 
 type Agent = ReturnType<typeof request.agent>;
 
@@ -16,7 +16,7 @@ const mk = async (agent: Agent, body: object) => (await agent.post("/api/tasks")
 let app: ReturnType<typeof createApp>;
 let agent: Agent;
 beforeEach(async () => {
-  app = createApp(openDb(":memory:"), "test-secret");
+  app = createApp(await testDb(), "test-secret");
   agent = await login(app);
 });
 

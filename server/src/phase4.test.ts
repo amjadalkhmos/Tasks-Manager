@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "./app.js";
-import { openDb, type DB } from "./db.js";
+import type { DB } from "./db.js";
+import { testDb } from "./test-db.js";
 import { fireDueReminders } from "./reminders.js";
 
 // Hashing cost is the slow part of signing people up; tests use the cheapest setting (production defaults to 10).
@@ -38,7 +39,7 @@ async function invite(owner: Agent, ws: number, email: string, role: string, inv
 }
 
 async function makeTeam(): Promise<Team> {
-  const db = openDb(":memory:");
+  const db = await testDb();
   const app = createApp(db, "s");
   const [a, b, c, d, e] = await Promise.all(["Alice", "Bob", "Carol", "Dave", "Erin"].map((n) => signup(app, n)));
   const ws = (await a.agent.post("/api/workspaces").send({ name: "Acme" }).expect(201)).body.id as number;
@@ -46,7 +47,7 @@ async function makeTeam(): Promise<Team> {
   await invite(a.agent, ws, c.email, "member", c.agent);
   await invite(a.agent, ws, d.email, "viewer", d.agent);
   const project = (await a.agent.post("/api/projects").send({ name: "Launch", workspace_id: ws }).expect(201)).body.id as number;
-  db.prepare("DELETE FROM alerts").run(); // start every test with an empty inbox (setup itself generates "invite accepted" alerts)
+  await db.run("DELETE FROM alerts"); // start every test with an empty inbox (setup itself generates "invite accepted" alerts)
   return {
     app, db, alice: a.agent, bob: b.agent, carol: c.agent, dave: d.agent, erin: e.agent, ws, project,
     ids: { alice: a.id, bob: b.id, carol: c.id, dave: d.id, erin: e.id },
@@ -173,7 +174,7 @@ describe("workspaces and membership", () => {
     await t.carol.get(`/api/tasks/${shared.id}`).expect(404);
     await t.carol.get(`/api/tasks/${mine.id}`).expect(200);
     expect((await t.carol.get("/api/projects")).body).toEqual([]);
-    expect(t.db.prepare("SELECT COUNT(*) n FROM activity").get()).toEqual({ n: 0 });
+    expect(await t.db.get("SELECT COUNT(*) AS n FROM activity")).toEqual({ n: 0 });
   });
 });
 
@@ -519,7 +520,7 @@ describe("people, profile and personal features alongside teams", () => {
     const past = "2020-01-01T00:00:00.000Z";
     const assigned = await mk(t.alice, { title: "For Carol", project_id: t.project, assignee_id: t.ids.carol, remind_at: past });
     const unassigned = await mk(t.alice, { title: "For Alice", project_id: t.project, remind_at: past });
-    expect(fireDueReminders(t.db, new Date())).toBe(2);
+    expect(await fireDueReminders(t.db, new Date())).toBe(2);
     expect(((await t.carol.get("/api/notifications")).body as Json[]).map((n) => n.title)).toEqual(["For Carol"]);
     expect(((await t.alice.get("/api/notifications")).body as Json[]).map((n) => n.title)).toEqual(["For Alice"]);
     expect((await t.bob.get("/api/notifications")).body).toEqual([]);
@@ -544,7 +545,7 @@ describe("people, profile and personal features alongside teams", () => {
     const task = await mk(t.alice, { title: "Shared timing", project_id: t.project });
     await t.carol.post(`/api/tasks/${task.id}/timer/start`).expect(201);
     await t.carol.post("/api/timer/stop").expect(200);
-    t.db.prepare("UPDATE time_entries SET started_at = datetime('now', '-30 minutes')").run();
+    await t.db.run("UPDATE time_entries SET started_at = ?", new Date(Date.now() - 30 * 60_000).toISOString());
     expect((await t.bob.get(`/api/tasks/${task.id}`)).body.tracked_min).toBeGreaterThanOrEqual(29);
     expect((await t.bob.get("/api/timer")).body).toBeNull(); // timers are per person
   });

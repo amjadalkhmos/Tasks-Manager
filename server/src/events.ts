@@ -1,4 +1,5 @@
-import type { DB } from "./db.js";
+import type { Queryable } from "./db.js";
+import { displayName } from "./dialect.js";
 
 export type ActivityKind =
   | "task_created"
@@ -20,35 +21,31 @@ export type ActivityKind =
 export type AlertKind = "assigned" | "mentioned" | "commented" | "invite_accepted" | "removed";
 
 /** Records something that happened in a workspace. Personal (no workspace) activity is not logged. */
-export function logActivity(
-  db: DB,
+export async function logActivity(
+  db: Queryable,
   workspaceId: number | null,
   userId: number,
   kind: ActivityKind,
   taskId: number | null,
   detail: Record<string, unknown> = {},
-) {
+): Promise<void> {
   if (workspaceId === null) return;
-  db.prepare("INSERT INTO activity (workspace_id, task_id, user_id, kind, detail_json) VALUES (?, ?, ?, ?, ?)").run(
-    workspaceId, taskId, userId, kind, JSON.stringify(detail),
-  );
+  await db.run("INSERT INTO activity (workspace_id, task_id, user_id, kind, detail_json) VALUES (?, ?, ?, ?, ?)", workspaceId, taskId, userId, kind, JSON.stringify(detail));
 }
 
 /** Tells someone about something. Nobody is notified about their own actions. */
-export function notify(
-  db: DB,
+export async function notify(
+  db: Queryable,
   a: { userId: number; kind: AlertKind; actorId: number; taskId?: number | null; workspaceId?: number | null; title?: string },
-) {
+): Promise<void> {
   if (a.userId === a.actorId) return;
-  db.prepare("INSERT INTO alerts (user_id, kind, actor_id, task_id, workspace_id, title) VALUES (?, ?, ?, ?, ?, ?)").run(
+  await db.run(
+    "INSERT INTO alerts (user_id, kind, actor_id, task_id, workspace_id, title) VALUES (?, ?, ?, ?, ?, ?)",
     a.userId, a.kind, a.actorId, a.taskId ?? null, a.workspaceId ?? null, (a.title ?? "").slice(0, 200),
   );
 }
 
-/** Display name: the chosen name, else the part of the email before the @. */
-export const displayNameSql = (alias = "u") => `COALESCE(NULLIF(TRIM(${alias}.name), ''), substr(${alias}.email, 1, instr(${alias}.email, '@') - 1))`;
-
-export function userName(db: DB, userId: number): string {
-  const r = db.prepare(`SELECT ${displayNameSql("u")} AS name FROM users u WHERE u.id = ?`).get(userId) as { name: string } | undefined;
+export async function userName(db: Queryable, userId: number): Promise<string> {
+  const r = await db.get<{ name: string }>(`SELECT ${displayName(db.dialect, "u")} AS name FROM users u WHERE u.id = ?`, userId);
   return r?.name ?? "Someone";
 }

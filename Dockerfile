@@ -36,9 +36,10 @@ COPY --from=build /app/server/package.json server/package.json
 COPY --from=build /app/server/dist server/dist
 COPY --from=build /app/web/dist web/dist
 
-# The database lives in /data. Mount a volume there (docker run -v, compose, or a Railway volume) so it survives
-# restarts and upgrades. There is deliberately no VOLUME instruction: some hosts (Railway) reject it.
-# The entrypoint fixes the folder's ownership (hosted volumes arrive owned by root), then drops to the "node" user.
+# With DATABASE_URL set the app uses PostgreSQL and keeps nothing on disk. Without it, it uses a SQLite file in /data:
+# mount a volume there (docker run -v, compose, or a Railway volume) so the file survives restarts and upgrades.
+# There is deliberately no VOLUME instruction: some hosts (Railway) reject it.
+# The entrypoint fixes /data's ownership (hosted volumes arrive owned by root), then drops to the "node" user.
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 3000
