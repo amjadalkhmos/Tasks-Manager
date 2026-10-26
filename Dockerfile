@@ -36,14 +36,15 @@ COPY --from=build /app/server/package.json server/package.json
 COPY --from=build /app/server/dist server/dist
 COPY --from=build /app/web/dist web/dist
 
-# The database lives in a volume so it survives container restarts and upgrades.
-RUN mkdir -p /data && chown node:node /data
-VOLUME /data
-USER node
+# The database lives in /data. Mount a volume there (docker run -v, compose, or a Railway volume) so it survives
+# restarts and upgrades. There is deliberately no VOLUME instruction: some hosts (Railway) reject it.
+# The entrypoint fixes the folder's ownership (hosted volumes arrive owned by root), then drops to the "node" user.
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD node -e "fetch('http://localhost:'+process.env.PORT+'/').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+  CMD node -e "fetch('http://localhost:'+process.env.PORT+'/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
 
 # JWT_SECRET must be provided at run time (the server refuses to start in production without it).
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "server/dist/index.js"]

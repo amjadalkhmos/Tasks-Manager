@@ -116,3 +116,10 @@ describe("nextOccurrence", () => {
     expect(nextOccurrence("2026-01-31T00:00:00.000Z", { freq: "monthly", interval: 1 })).toBe("2026-02-28T00:00:00.000Z");
   });
 });
+
+describe("health", () => {
+  it("answers without a login, for uptime checks", async () => {
+    const { app } = setup();
+    expect((await request(app).get("/api/health").expect(200)).body).toEqual({ ok: true });
+  });
+});

@@ -89,6 +89,12 @@ export function createApp(db: DB, secret: string, options: AppOptions = {}) {
   registerGoogle(app, { db, auth, uid, api: options.google ?? null, secret, key: makeKey(options.tokenEncKey, secret) });
   registerCollab(app, { db, auth, uid });
 
+  // For load balancers and uptime checks: confirms the process is up and the database answers.
+  app.get("/api/health", (_req, res) => {
+    db.prepare("SELECT 1").get();
+    res.json({ ok: true });
+  });
+
   app.use("/api", (_req, res) => {
     res.status(404).json({ error: "Not found" });
   });
