@@ -1,8 +1,10 @@
 import { CalendarDays, Clock, CornerDownRight, ListChecks, ListTree, Lock, MessageSquare, Repeat, Timer, Video } from "lucide-react";
 import type { Task } from "../api";
 import { usePeople } from "../lib/people";
+import { useStatuses } from "../lib/statuses";
 import { PRIORITY, describeRecurrence, dueState, formatDue, formatMinutes } from "../lib/tasks";
 import { Avatar } from "./Avatar";
+import { StatusChip } from "./StatusChip";
 
 interface Props {
   task: Task;
@@ -17,6 +19,7 @@ const ICON = 13;
 export function TaskRow({ task: t, onOpen, onToggle, nested }: Props) {
   const due = dueState(t);
   const { nameOf } = usePeople();
+  const status = useStatuses().of(t);
   return (
     <li className={t.status === "done" ? "done" : ""} data-priority={t.priority}>
       <input
@@ -32,6 +35,7 @@ export function TaskRow({ task: t, onOpen, onToggle, nested }: Props) {
         {t.title}
       </button>
       <span className="meta">
+        <StatusChip status={status} />
         {t.blocked && t.status !== "done" && (
           <span title="Blocked by unfinished tasks"><Lock size={ICON} data-icon="lock" /></span>
         )}

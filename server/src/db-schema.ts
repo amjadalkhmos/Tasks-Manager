@@ -53,7 +53,45 @@ CREATE TABLE IF NOT EXISTS projects (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   color TEXT NOT NULL DEFAULT '#4f46e5',
-  workspace_id INTEGER REFERENCES workspaces(id)
+  workspace_id INTEGER REFERENCES workspaces(id),
+  description TEXT NOT NULL DEFAULT '',
+  stage TEXT NOT NULL DEFAULT 'active' CHECK (stage IN ('planning','active','on_hold','completed','archived')),
+  lead_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  start_date TEXT,
+  target_date TEXT
+);
+-- Task statuses. Every status belongs to a category (todo, doing or done), which is what the app's logic (completion,
+-- recurrence, dependencies, progress) uses; the name and colour are the team's own. A status belongs either to one
+-- project, or to a workspace (used by the workspace's projects that don't define their own). With none defined, the
+-- built-in To do / Doing / Done apply.
+CREATE TABLE IF NOT EXISTS statuses (
+  id ${ID},
+  workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+  project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  category TEXT NOT NULL CHECK (category IN ('todo','doing','done')),
+  color TEXT NOT NULL DEFAULT '#64748b',
+  position INTEGER NOT NULL DEFAULT 0,
+  CHECK ((workspace_id IS NULL AND project_id IS NOT NULL) OR (workspace_id IS NOT NULL AND project_id IS NULL))
+);
+-- A project's history: progress updates (with a health rating) and stage changes (with an optional note).
+CREATE TABLE IF NOT EXISTS project_updates (
+  id ${ID},
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('update','stage')),
+  stage TEXT,
+  health TEXT CHECK (health IN ('on_track','at_risk','off_track')),
+  body TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT ${NOW_ISO}
+);
+CREATE TABLE IF NOT EXISTS milestones (
+  id ${ID},
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  due_date TEXT,
+  completed_at TEXT,
+  position INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS tags (
   id ${ID},
@@ -79,7 +117,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at TEXT NOT NULL DEFAULT ${NOW},
   position ${REAL} NOT NULL DEFAULT 0,
   estimate_min INTEGER,
-  assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+  assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  status_id INTEGER REFERENCES statuses(id) ON DELETE SET NULL
 );
 CREATE TABLE IF NOT EXISTS task_tags (
   task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -207,6 +246,11 @@ CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id);
 CREATE INDEX IF NOT EXISTS idx_projects_ws ON projects(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status_id);
+CREATE INDEX IF NOT EXISTS idx_statuses_ws ON statuses(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_statuses_project ON statuses(project_id);
+CREATE INDEX IF NOT EXISTS idx_project_updates ON project_updates(project_id, id);
+CREATE INDEX IF NOT EXISTS idx_milestones_project ON milestones(project_id);
 CREATE INDEX IF NOT EXISTS idx_members_user ON workspace_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task ON comments(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_time_user ON time_entries(user_id, started_at);
@@ -229,9 +273,17 @@ const SQLITE_COLUMNS: Record<string, [string, string][]> = {
     ["position", "REAL NOT NULL DEFAULT 0"],
     ["estimate_min", "INTEGER"],
     ["assignee_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"],
+    ["status_id", "INTEGER REFERENCES statuses(id) ON DELETE SET NULL"],
   ],
   users: [["name", "TEXT"]],
-  projects: [["workspace_id", "INTEGER REFERENCES workspaces(id)"]],
+  projects: [
+    ["workspace_id", "INTEGER REFERENCES workspaces(id)"],
+    ["description", "TEXT NOT NULL DEFAULT ''"],
+    ["stage", "TEXT NOT NULL DEFAULT 'active' CHECK (stage IN ('planning','active','on_hold','completed','archived'))"],
+    ["lead_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"],
+    ["start_date", "TEXT"],
+    ["target_date", "TEXT"],
+  ],
 };
 
 export async function createSchema(db: Queryable): Promise<void> {

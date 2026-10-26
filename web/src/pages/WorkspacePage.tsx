@@ -4,6 +4,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { LogOut, Mail, Pencil, Plus, Trash2, UserMinus, X } from "lucide-react";
 import { api, type Member, type Role } from "../api";
 import { Avatar } from "../components/Avatar";
+import { StatusManager } from "../components/StatusManager";
 import { describeActivity } from "../lib/activity";
 import { usePeople } from "../lib/people";
 import { timeAgo } from "../lib/time";
@@ -250,6 +251,12 @@ export function WorkspacePage({ onOpenTask }: { onOpenTask: (id: number) => void
             <button type="submit" className="secondary" disabled={!newProject.trim() || addProject.isPending}><Plus size={15} /> Add project</button>
           </form>
         )}
+      </section>
+
+      <section className="panel" aria-label="Task statuses">
+        <h2>Task statuses</h2>
+        <p className="muted small">The statuses tasks can have in this workspace's projects. A project can define its own instead, from its Settings tab.</p>
+        <StatusManager scope={{ workspace_id: wsId }} canManage={isAdmin} />
       </section>
 
       <section className="panel" aria-label="Activity">

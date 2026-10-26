@@ -13,6 +13,8 @@ import { registerGoogle, type GoogleApi } from "./google.js";
 import { registerTasks } from "./tasks.js";
 import { registerCollab } from "./collab.js";
 import { registerMeetings } from "./meetings.js";
+import { registerProjectManagement } from "./pm.js";
+import { registerStatuses } from "./statuses.js";
 import { displayName } from "./dialect.js";
 import { makeKey } from "./secrets.js";
 
@@ -96,6 +98,8 @@ export function createApp(db: DB, secret: string, options: AppOptions = {}) {
   registerGoogle(app, { db, auth, uid, api: options.google ?? null, secret, key: makeKey(options.tokenEncKey, secret) });
   registerCollab(app, { db, auth, uid });
   registerMeetings(app, { db, auth, uid });
+  registerStatuses(app, { db, auth, uid });
+  registerProjectManagement(app, { db, auth, uid });
 
   // For load balancers and uptime checks: confirms the process is up and the database answers.
   app.get("/api/health", async (_req, res) => {

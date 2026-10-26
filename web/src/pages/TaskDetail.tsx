@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowUp, Bell, CalendarDays, Eye, Flag, Folder, Hash, History, Lock, Play, Plus, Repeat, Sparkles, Square, Timer, Trash2, UserCheck, X } from "lucide-react";
+import { ArrowUp, Bell, CalendarDays, CircleDot, Eye, Flag, Folder, Hash, History, Lock, Play, Plus, Repeat, Sparkles, Square, Timer, Trash2, UserCheck, X } from "lucide-react";
 import { api, type Recurrence, type Task } from "../api";
 import { Avatar } from "../components/Avatar";
 import { Comments } from "../components/Comments";
@@ -8,6 +8,7 @@ import { MeetingDrawer } from "../components/MeetingDrawer";
 import { TaskMeetings } from "../components/TaskMeetings";
 import { describeActivity } from "../lib/activity";
 import { usePeople } from "../lib/people";
+import { statusOf, useStatuses } from "../lib/statuses";
 import { fromLocalInput, toLocalInput } from "../lib/datetime";
 import { formatMinutes } from "../lib/tasks";
 import { timeAgo } from "../lib/time";
@@ -130,9 +131,14 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  const statuses = useStatuses();
   const save = useMutation({
-    mutationFn: (d: Task) =>
-      api.updateTask(d.id, {
+    mutationFn: async (d: Task) => {
+      // Only send the status when it was changed here and the task stays where it is; after a move the server picks one.
+      const statusChanged = task && d.project_id === task.project_id && (d.status !== task.status || d.status_id !== task.status_id);
+      const becomesDone = !!statusChanged && d.status === "done" && task!.status !== "done";
+      await api.updateTask(d.id, {
+        ...(statusChanged && !becomesDone ? (d.status_id !== null ? { status_id: d.status_id } : { status: d.status, status_id: null }) : {}),
         title: d.title,
         notes: d.notes,
         priority: d.priority,
@@ -143,7 +149,10 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
         recurrence: d.recurrence,
         estimate_min: d.estimate_min,
         tags: tagText.split(",").map((s) => s.trim()).filter(Boolean),
-      }),
+      });
+      // Finishing goes through "complete" so a recurring task spawns its next occurrence.
+      if (becomesDone) await api.completeTask(d.id, d.status_id ?? undefined);
+    },
     onSuccess: () => actions.refresh().then(onClose),
   });
   const remove = useMutation({ mutationFn: () => api.deleteTask(id), onSuccess: () => actions.refresh().then(onClose) });
@@ -185,9 +194,13 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
   // Prerequisites must live in the same place (same workspace, or both private) and be editable by this person.
   const depCandidates = all.filter((t) => t.id !== id && t.status !== "done" && !task.blocked_by.includes(t.id) && t.workspace_id === task.workspace_id && t.access !== "read");
   const readOnly = task.access === "read";
+  const draftWorkspace = (projects.data ?? []).find((p) => p.id === draft.project_id)?.workspace_id ?? null;
+  const placeStatuses = statuses.forPlace(draft.project_id, draftWorkspace);
   const members = wsDetail.data?.members ?? [];
   const assignable = members.filter((m) => m.role !== "viewer");
-  const personalProjects = (projects.data ?? []).filter((p) => p.workspace_id === null);
+  // Archived projects don't take tasks (unless the task is already in one).
+  const pickable = (p: { id: number; stage: string }) => p.stage !== "archived" || p.id === draft.project_id;
+  const personalProjects = (projects.data ?? []).filter((p) => p.workspace_id === null && pickable(p));
   const error = (save.error ?? addDep.error ?? addSub.error ?? remove.error)?.message ?? actions.error;
   const parent = task.parent_id !== null ? all.find((t) => t.id === task.parent_id) : undefined;
 
@@ -231,6 +244,20 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
                 <option value={3}>High</option>
               </select>
             </Prop>
+            <Prop icon={<CircleDot size={15} />} label="Status">
+              <select
+                aria-label="Status"
+                value={statusOf(placeStatuses, draft).id ?? `c:${draft.status}`}
+                onChange={(e) => {
+                  const o = placeStatuses.find((s) => String(s.id ?? `c:${s.category}`) === e.target.value)!;
+                  patch({ status: o.category, status_id: o.id });
+                }}
+              >
+                {placeStatuses.map((s) => (
+                  <option key={String(s.id ?? s.category)} value={s.id ?? `c:${s.category}`}>{s.name}</option>
+                ))}
+              </select>
+            </Prop>
             <Prop icon={<Folder size={15} />} label="Project">
               <select
                 aria-label="Project"
@@ -247,7 +274,7 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
                 )}
                 {workspaces.data?.map((w) => (
                   <optgroup key={w.id} label={`${w.name} (shared)`}>
-                    {(projects.data ?? []).filter((p) => p.workspace_id === w.id).map((p) => (
+                    {(projects.data ?? []).filter((p) => p.workspace_id === w.id && pickable(p)).map((p) => (
                       <option key={p.id} value={p.id} disabled={w.role === "viewer"}>{p.name}</option>
                     ))}
                   </optgroup>

@@ -64,7 +64,8 @@ function empty(view: View, filtered: boolean) {
   }
 }
 
-export function TaskList({ view, onOpen }: { view: View; onOpen: (id: number) => void }) {
+/** `embedded`: shown under a page that already has the heading (a project's page), so this one leaves it out. */
+export function TaskList({ view, onOpen, embedded }: { view: View; onOpen: (id: number) => void; embedded?: boolean }) {
   const params = useParams();
   const qc = useQueryClient();
   const tasks = useQuery({ queryKey: ["tasks"], queryFn: () => api.tasks() });
@@ -130,7 +131,8 @@ export function TaskList({ view, onOpen }: { view: View; onOpen: (id: number) =>
   // A workspace project can be read-only for the signed-in person (viewer role).
   const currentProject = view === "project" ? projects.data?.find((p) => p.id === Number(params.id)) : undefined;
   const workspace = currentProject?.workspace_id ? workspaces.data?.find((w) => w.id === currentProject.workspace_id) : undefined;
-  const viewOnly = workspace?.role === "viewer";
+  const archived = currentProject?.stage === "archived";
+  const viewOnly = workspace?.role === "viewer" || archived;
 
   const heading =
     view === "project"
@@ -156,10 +158,14 @@ export function TaskList({ view, onOpen }: { view: View; onOpen: (id: number) =>
   return (
     <div>
       <header className="page-header">
-        <div>
-          <h1>{heading}</h1>
-          {tasks.data && <p className="sub">{openCount} open{workspace ? ` · ${workspace.name}` : ""}{viewOnly ? " · view only" : ""}</p>}
-        </div>
+        {embedded ? (
+          <p className="sub">{openCount} open{viewOnly ? " · view only" : ""}</p>
+        ) : (
+          <div>
+            <h1>{heading}</h1>
+            {tasks.data && <p className="sub">{openCount} open{workspace ? ` · ${workspace.name}` : ""}{viewOnly ? " · view only" : ""}</p>}
+          </div>
+        )}
         <div className="page-actions">
           {view === "today" && aiStatus.data?.enabled && (
             <button type="button" className="secondary" disabled={plan.isPending} onClick={() => plan.mutate()}>
@@ -230,7 +236,11 @@ export function TaskList({ view, onOpen }: { view: View; onOpen: (id: number) =>
         </div>
       )}
 
-      {viewOnly && <p className="muted small" style={{ marginBottom: 12 }}>You can read this project but not change it. Ask an admin of {workspace?.name} for member access.</p>}
+      {viewOnly && (
+        <p className="muted small" style={{ marginBottom: 12 }}>
+          {archived ? "This project is archived. Restore it from the project's header to add tasks." : `You can read this project but not change it. Ask an admin of ${workspace?.name} for member access.`}
+        </p>
+      )}
 
       {view !== "filter" && !viewOnly && (
         <>

@@ -9,6 +9,8 @@ import { countWhere, epoch, likeCI } from "./dialect.js";
 import { logActivity, notify, userName } from "./events.js";
 import { HttpError, parseId } from "./http-error.js";
 import { nextOccurrence, parseRule, recurrenceSchema } from "./recurrence.js";
+import { assertLeadAllowed } from "./pm.js";
+import { keepOrPick, statusFits, statusFor } from "./statuses.js";
 
 const iso = z.string().datetime({ offset: true });
 
@@ -20,6 +22,7 @@ const taskFields = {
   assignee_id: z.number().int().nullable(),
   priority: z.number().int().min(0).max(3),
   status: z.enum(["todo", "doing", "done"]),
+  status_id: z.number().int().nullable(),
   due_at: iso.nullable(),
   remind_at: iso.nullable(),
   recurrence: recurrenceSchema.nullable(),
@@ -34,8 +37,12 @@ const projectBody = z.object({
   name: z.string().min(1).max(100),
   color: z.string().regex(/^#[0-9a-f]{6}$/i),
   workspace_id: z.number().int().nullable(),
+  description: z.string().max(5000),
+  lead_id: z.number().int().nullable(),
+  start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((v) => !Number.isNaN(Date.parse(v)), "Not a real date").nullable(),
+  target_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((v) => !Number.isNaN(Date.parse(v)), "Not a real date").nullable(),
 });
-const PROJECT_COLS = "id, name, color, workspace_id";
+const PROJECT_COLS = "id, name, color, workspace_id, description, stage, lead_id, start_date, target_date";
 
 interface Deps {
   db: DB;
@@ -147,6 +154,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
       due_at: string | null;
       remind_at: string | null;
       status: string;
+      status_id: number | null;
     };
   };
 
@@ -196,7 +204,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
   });
 
   app.post("/api/projects", auth, async (req, res) => {
-    const b = projectBody.partial({ color: true, workspace_id: true }).parse(req.body);
+    const b = projectBody.pick({ name: true, color: true, workspace_id: true }).partial({ color: true, workspace_id: true }).parse(req.body);
     const me = uid(req);
     if (b.workspace_id != null) {
       const role = await roleIn(db, b.workspace_id, me);
@@ -209,11 +217,18 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
   });
 
   app.patch("/api/projects/:id", auth, async (req, res) => {
-    const b = projectBody.pick({ name: true, color: true }).partial().parse(req.body);
+    const b = projectBody.pick({ name: true, color: true, description: true, lead_id: true, start_date: true, target_date: true }).partial().parse(req.body);
     const pa = await projectAccess(db, uid(req), parseId(req.params.id, "Project not found"));
     if (!pa) throw new HttpError(404, "Project not found");
     if (pa.workspaceId !== null && !(pa.canManage || (pa.canWrite && pa.creatorId === uid(req)))) throw FORBIDDEN();
-    await db.run("UPDATE projects SET name = COALESCE(?, name), color = COALESCE(?, color) WHERE id = ?", b.name ?? null, b.color ?? null, pa.id);
+    if (b.lead_id != null) await assertLeadAllowed(db, pa.workspaceId, pa.creatorId, b.lead_id);
+    await db.tx(async (t) => {
+      await t.run("UPDATE projects SET name = COALESCE(?, name), color = COALESCE(?, color), description = COALESCE(?, description) WHERE id = ?", b.name ?? null, b.color ?? null, b.description ?? null, pa.id);
+      // These can be cleared, so they are set only when given (null clears).
+      if (b.lead_id !== undefined) await t.run("UPDATE projects SET lead_id = ? WHERE id = ?", b.lead_id, pa.id);
+      if (b.start_date !== undefined) await t.run("UPDATE projects SET start_date = ? WHERE id = ?", b.start_date, pa.id);
+      if (b.target_date !== undefined) await t.run("UPDATE projects SET target_date = ? WHERE id = ?", b.target_date, pa.id);
+    });
     res.json(await db.get(`SELECT ${PROJECT_COLS} FROM projects WHERE id = ?`, pa.id));
   });
 
@@ -264,6 +279,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     parent_id: z.union([z.literal("null"), z.coerce.number().int()]).optional(),
     tag: z.string().optional(),
     status: z.enum(["todo", "doing", "done", "open"]).optional(),
+    status_id: z.coerce.number().int().optional(),
     priority: z.coerce.number().int().min(0).max(3).optional(),
     due_before: iso.optional(),
     due_after: iso.optional(),
@@ -289,6 +305,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     else if (f.parent_id !== undefined) add("t.parent_id = ?", f.parent_id);
     if (f.status === "open") where.push("t.status != 'done'");
     else if (f.status) add("t.status = ?", f.status);
+    if (f.status_id !== undefined) add("t.status_id = ?", f.status_id);
     if (f.priority !== undefined) add("t.priority = ?", f.priority);
     if (f.due_before) add("t.due_at <= ?", f.due_before);
     if (f.due_after) add("t.due_at >= ?", f.due_after);
@@ -324,17 +341,28 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
       if (!pa) throw new HttpError(400, "Invalid project_id");
       if (!pa.canWrite) throw FORBIDDEN();
       workspaceId = pa.workspaceId;
+      if (pa.stage === "archived") throw new HttpError(409, "This project is archived. Restore it to add tasks.");
+    }
+    let status = b.status ?? "todo";
+    let statusId: number | null;
+    if (b.status_id != null) {
+      const s = await statusFits(db, b.status_id, projectId, workspaceId);
+      if (b.status !== undefined && b.status !== s.category) throw new HttpError(400, "status and status_id disagree");
+      status = s.category;
+      statusId = s.id;
+    } else {
+      statusId = await statusFor(db, projectId, workspaceId, status);
     }
     if (parent && parent.workspaceId !== workspaceId) throw new HttpError(400, "A subtask must be in the same workspace as its parent");
     if (b.assignee_id != null) await assertAssignable(db, workspaceId, b.assignee_id);
 
     const id = await db.tx(async (t) => {
       const taskId = await t.insert(
-        `INSERT INTO tasks (user_id, project_id, parent_id, assignee_id, title, notes, priority, status, due_at, remind_at, recurrence_rule, completed_at, position, estimate_min)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(CAST(? AS REAL), (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE user_id = ?)), ?)`,
-        me, projectId, b.parent_id ?? null, b.assignee_id ?? null, b.title, b.notes ?? "", b.priority ?? 0, b.status ?? "todo",
+        `INSERT INTO tasks (user_id, project_id, parent_id, assignee_id, title, notes, priority, status, status_id, due_at, remind_at, recurrence_rule, completed_at, position, estimate_min)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(CAST(? AS REAL), (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE user_id = ?)), ?)`,
+        me, projectId, b.parent_id ?? null, b.assignee_id ?? null, b.title, b.notes ?? "", b.priority ?? 0, status, statusId,
         b.due_at ?? null, b.remind_at ?? null, b.recurrence ? JSON.stringify(b.recurrence) : null,
-        b.status === "done" ? new Date().toISOString() : null, b.position ?? null, me, b.estimate_min ?? null,
+        status === "done" ? new Date().toISOString() : null, b.position ?? null, me, b.estimate_min ?? null,
       );
       await setTags(t, me, taskId, b.tags ?? []);
       await logActivity(t, workspaceId, me, "task_created", taskId, { title: b.title });
@@ -367,7 +395,21 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
         if (!pa.canWrite) throw FORBIDDEN();
         newProject = pa.id;
         newWs = pa.workspaceId;
+        if (pa.stage === "archived") throw new HttpError(409, "This project is archived. Restore it to move tasks into it.");
       }
+    }
+
+    // The task's status: an explicit status_id wins (and fixes the category); otherwise it follows a category change or a move.
+    let newStatusId = current.status_id as number | null;
+    if (b.status_id != null) {
+      const s = await statusFits(db, b.status_id, newProject, newWs);
+      if (b.status !== undefined && b.status !== s.category) throw new HttpError(400, "status and status_id disagree");
+      b.status = s.category;
+      newStatusId = s.id;
+    } else if (b.status_id === null) {
+      newStatusId = null;
+    } else if (b.status !== undefined || newProject !== current.project_id) {
+      newStatusId = await keepOrPick(db, newStatusId, newProject, newWs, (b.status ?? current.status) as "todo" | "doing" | "done");
     }
     const scopeChange = newWs !== ta.workspaceId;
     // Moving work between private and shared (or between workspaces) is for its author, or a workspace admin moving it elsewhere shared.
@@ -402,6 +444,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
       }
       if (newProject !== current.project_id) set("project_id", newProject);
       if (newParent !== current.parent_id) set("parent_id", newParent);
+      if (newStatusId !== current.status_id) set("status_id", newStatusId);
       if (newAssignee !== current.assignee_id) set("assignee_id", newAssignee);
       if (b.remind_at !== undefined) {
         set("remind_at", b.remind_at);
@@ -420,6 +463,8 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
         await t.run(`UPDATE tasks SET project_id = ? WHERE id IN (${m})`, newProject, ...family);
         // Subtasks lose their assignees: those people may not be in the destination.
         await t.run(`UPDATE tasks SET assignee_id = NULL WHERE id IN (${m}) AND id != ?`, ...family, taskId);
+        // ...and fall back to the default status of their category, since the statuses differ in the new place.
+        await t.run(`UPDATE tasks SET status_id = NULL WHERE id IN (${m}) AND id != ?`, ...family, taskId);
         const outside = await t.all<{ task_id: number; blocked_by_id: number }>(
           `SELECT d.task_id, d.blocked_by_id FROM task_deps d
            WHERE (d.task_id IN (${m}) AND d.blocked_by_id NOT IN (${m})) OR (d.blocked_by_id IN (${m}) AND d.task_id NOT IN (${m}))`,
@@ -465,8 +510,12 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     const task = await getTask(me, ta.row.id);
     if (task.status === "done") throw new HttpError(409, "Task already completed");
     if (task.blocked) throw new HttpError(409, "Task is blocked by unfinished tasks");
+    // Optionally completes into a particular "done" status (e.g. "Shipped" rather than the first one).
+    const chosen = z.object({ status_id: z.number().int().optional() }).parse(req.body ?? {}).status_id;
+    if (chosen !== undefined && (await statusFits(db, chosen, task.project_id, task.workspace_id)).category !== "done") throw new HttpError(400, "That isn't a done status");
     const nextId = await db.tx(async (t) => {
-      await t.run("UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?", new Date().toISOString(), task.id);
+      const doneId = chosen ?? (await keepOrPick(t, task.status_id as number | null, task.project_id, task.workspace_id, "done"));
+      await t.run("UPDATE tasks SET status = 'done', status_id = ?, completed_at = ? WHERE id = ?", doneId, new Date().toISOString(), task.id);
       await logActivity(t, ta.workspaceId, me, "task_completed", task.id, { title: task.title });
       if (!task.recurrence) return null;
       const due = nextOccurrence(task.due_at ?? new Date().toISOString(), task.recurrence);
@@ -478,6 +527,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
         due, remind, task.id,
       );
       await setTags(t, me, spawned, task.tags);
+      await t.run("UPDATE tasks SET status_id = ? WHERE id = ?", await statusFor(t, task.project_id, task.workspace_id, "todo"), spawned);
       return spawned;
     });
     res.json({ completed: await getTask(me, task.id), next: nextId ? await getTask(me, nextId) : null });

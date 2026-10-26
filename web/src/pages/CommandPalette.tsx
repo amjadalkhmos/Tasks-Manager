@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
-  BookmarkCheck, CalendarClock, CalendarDays, ChartNoAxesColumn, CircleCheck, Circle, Folder, Inbox, KanbanSquare, ListTodo, Plus, Search, Sun, Video,
+  BookmarkCheck, CalendarClock, CalendarDays, ChartNoAxesColumn, CircleCheck, Circle, Folder, FolderKanban, Inbox, KanbanSquare, ListTodo, Plus, Search, Sun, Video,
 } from "lucide-react";
 import { api } from "../api";
 import { parseQuickAdd } from "../lib/quickAdd";
@@ -24,6 +24,7 @@ const PAGES: [string, string, ReactNode][] = [
   ["All tasks", "/all", <ListTodo size={I} />],
   ["Board", "/board", <KanbanSquare size={I} />],
   ["Calendar", "/calendar", <CalendarDays size={I} />],
+  ["Projects overview", "/projects", <FolderKanban size={I} />],
   ["Meetings", "/meetings", <Video size={I} />],
   ["Dashboard", "/dashboard", <ChartNoAxesColumn size={I} />],
 ];

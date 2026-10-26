@@ -20,6 +20,12 @@ A task manager you can use alone or with a team. Capture a task in one line, pla
 - Views: Inbox, Today, Upcoming, Board (drag between columns), Calendar (drag to reschedule), saved smart lists, and a dashboard with a weekly review.
 - Time tracking with estimates, a command palette (`Ctrl+K`), and keyboard shortcuts. Light and dark themes follow your system.
 
+**Statuses, meetings and projects**
+- **Every task shows a status.** Out of the box that is To do, Doing or Done. A workspace's admins can define their own (for example *Backlog*, *In review*, *Shipped*) for the whole workspace, and any single project can define its own instead. Each status belongs to one of the three stages, which is what decides what counts as finished (completion, recurrence, dependencies and progress all use the stage). The Board uses a project's statuses as its columns.
+- **Meetings** are created in the app (private, or shared with a workspace) and linked to any number of tasks in the same place, from the task or from the *Meetings* page. They already carry a source and external id, so syncing with Google Calendar later can update meetings instead of duplicating them.
+- **Project life cycle**: Planning → Active → On hold / Completed → Archived, with the allowed moves enforced, a note and history for every change, a warning before completing a project with open tasks, and archived projects hidden from the sidebar (and closed to new tasks) until restored.
+- **Project management**: each project has a lead, start and target dates, a description, milestones, health updates (on track / at risk / off track) and an overview of progress, work by status, workload per person, overdue and blocked work, and time against estimates. *Projects* shows every project side by side.
+
 **Works anywhere**
 - Installable as an app. It opens without a connection and shows your last-seen tasks; creating, editing, completing and deleting tasks while offline is saved on your device and synced when you reconnect.
 - Import from this app's JSON, a CSV, Todoist, or Trello. Export to JSON or CSV.
@@ -157,7 +163,7 @@ npm test                       # SQLite and PostgreSQL (in-process), plus the we
 npm run test:postgres -w server   # additionally: a real PostgreSQL server (set TEST_DATABASE_URL first)
 ```
 
-`npm test` runs every server test twice, once on SQLite and once on PostgreSQL via [PGlite](https://pglite.dev) (real PostgreSQL compiled to WebAssembly, so nothing needs installing), and 9 web unit tests. Setting `TEST_DATABASE_URL=postgres://…` (an empty, disposable database: its tables are emptied between tests) adds a third pass through the real `pg` driver. The suite includes a role-by-role permission matrix for workspaces, the private/shared boundary, a test that SQLite data copied to PostgreSQL gives identical answers from the API, and tests of the database layer itself.
+`npm test` runs every server test twice, once on SQLite and once on PostgreSQL via [PGlite](https://pglite.dev) (real PostgreSQL compiled to WebAssembly, so nothing needs installing), and the web unit tests. Setting `TEST_DATABASE_URL=postgres://…` (an empty, disposable database: its tables are emptied between tests) adds a third pass through the real `pg` driver. The suite includes a role-by-role permission matrix for workspaces, the private/shared boundary, a test that SQLite data copied to PostgreSQL gives identical answers from the API, and tests of the database layer itself.
 
 What is **not** covered by tests that touch the real world:
 - The AI helpers and the Google integration are tested against fakes. They have not been run against the live Claude or Google APIs.

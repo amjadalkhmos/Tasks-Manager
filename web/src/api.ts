@@ -26,6 +26,8 @@ export interface Task {
   notes: string;
   priority: number;
   status: "todo" | "doing" | "done";
+  /** The custom status (see Status), or null for the built-in one of this category. */
+  status_id: number | null;
   due_at: string | null;
   remind_at: string | null;
   recurrence: Recurrence | null;
@@ -103,13 +105,81 @@ export interface RunningTimer {
   title: string;
 }
 
+export type Category = "todo" | "doing" | "done";
+
+export interface Status {
+  id: number;
+  /** Set for a workspace-wide status; null when the status belongs to one project. */
+  workspace_id: number | null;
+  project_id: number | null;
+  name: string;
+  category: Category;
+  color: string;
+  position: number;
+}
+
+export type Stage = "planning" | "active" | "on_hold" | "completed" | "archived";
+export type Health = "on_track" | "at_risk" | "off_track";
+
 export interface Project {
   id: number;
   name: string;
   color: string;
   /** null for private projects. */
   workspace_id: number | null;
+  description: string;
+  stage: Stage;
+  lead_id: number | null;
+  /** YYYY-MM-DD */
+  start_date: string | null;
+  target_date: string | null;
 }
+
+export interface Milestone {
+  id: number;
+  project_id: number;
+  name: string;
+  due_date: string | null;
+  completed_at: string | null;
+  position: number;
+}
+
+export interface PortfolioRow extends Project {
+  tasks_total: number;
+  tasks_done: number;
+  tasks_doing: number;
+  tasks_overdue: number;
+  milestones_total: number;
+  milestones_done: number;
+  next_milestone: { name: string; due_date: string | null } | null;
+  health: Health | null;
+  last_update_at: string | null;
+}
+
+export interface ProjectUpdate {
+  id: number;
+  user_id: number;
+  author: string;
+  kind: "update" | "stage";
+  stage: Stage | null;
+  health: Health | null;
+  body: string;
+  created_at: string;
+}
+
+export interface ProjectOverview {
+  project: Project & { lead_name: string | null };
+  access: { can_write: boolean; can_manage: boolean };
+  transitions: Stage[];
+  progress: Omit<PortfolioRow, keyof Project> & { tasks_blocked: number };
+  by_status: { id: number | null; name: string; color: string; category: Category; count: number }[];
+  workload: { assignee_id: number | null; open: number }[];
+  time: { tracked_min: number; estimate_min: number };
+  milestones: Milestone[];
+  updates: ProjectUpdate[];
+}
+
+export type StatusScope = { project_id: number } | { workspace_id: number };
 
 export interface Person {
   id: number;
@@ -280,12 +350,31 @@ export const api = {
   createTask: (t: Partial<Omit<Task, "id">>) => request<Task>("POST", "/tasks", t),
   updateTask: (id: number, t: Partial<Omit<Task, "id">>) => request<Task>("PATCH", `/tasks/${id}`, t),
   deleteTask: (id: number) => request<void>("DELETE", `/tasks/${id}`),
-  completeTask: (id: number) => request<{ completed: Task; next: Task | null }>("POST", `/tasks/${id}/complete`),
+  completeTask: (id: number, statusId?: number) =>
+    request<{ completed: Task; next: Task | null }>("POST", `/tasks/${id}/complete`, statusId === undefined ? undefined : { status_id: statusId }),
 
   projects: () => request<Project[]>("GET", "/projects"),
   createProject: (name: string, workspaceId?: number) =>
     request<Project>("POST", "/projects", { name, ...(workspaceId ? { workspace_id: workspaceId } : {}) }),
   renameProject: (id: number, name: string) => request<Project>("PATCH", `/projects/${id}`, { name }),
+  updateProject: (id: number, p: Partial<Pick<Project, "name" | "color" | "description" | "lead_id" | "start_date" | "target_date">>) =>
+    request<Project>("PATCH", `/projects/${id}`, p),
+  setStage: (id: number, stage: Stage, note?: string, force?: boolean) => request<Project>("POST", `/projects/${id}/stage`, { stage, note, force }),
+  portfolio: () => request<PortfolioRow[]>("GET", "/portfolio"),
+  overview: (id: number) => request<ProjectOverview>("GET", `/projects/${id}/overview`),
+  postUpdate: (id: number, health: Health, body: string) => request<ProjectUpdate>("POST", `/projects/${id}/updates`, { health, body }),
+  deleteUpdate: (id: number, updateId: number) => request<void>("DELETE", `/projects/${id}/updates/${updateId}`),
+  addMilestone: (id: number, name: string, due_date: string | null) => request<Milestone>("POST", `/projects/${id}/milestones`, { name, due_date }),
+  updateMilestone: (id: number, m: { name?: string; due_date?: string | null; done?: boolean }) => request<Milestone>("PATCH", `/milestones/${id}`, m),
+  deleteMilestone: (id: number) => request<void>("DELETE", `/milestones/${id}`),
+
+  statuses: () => request<Status[]>("GET", "/statuses"),
+  seedStatuses: (scope: StatusScope) => request<Status[]>("POST", "/statuses/defaults", scope),
+  addStatus: (scope: StatusScope, s: { name: string; category: Category; color?: string }) => request<Status>("POST", "/statuses", { ...scope, ...s }),
+  updateStatus: (id: number, s: Partial<Pick<Status, "name" | "color" | "position">>) => request<Status>("PATCH", `/statuses/${id}`, s),
+  deleteStatus: (id: number) => request<void>("DELETE", `/statuses/${id}`),
+  resetStatuses: (scope: StatusScope) =>
+    request<void>("DELETE", `/statuses?${"project_id" in scope ? `project_id=${scope.project_id}` : `workspace_id=${scope.workspace_id}`}`),
   deleteProject: (id: number) => request<void>("DELETE", `/projects/${id}`),
   tags: () => request<Tag[]>("GET", "/tags"),
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Bell, BookmarkCheck, CalendarClock, CalendarDays, ChartNoAxesColumn, Check, Hash, Inbox, KanbanSquare, ListTodo, LogOut, Menu, Plus, RefreshCw, Search, Settings, Sun, Timer, UserCheck, Users, Video, WifiOff, X,
+  Bell, BookmarkCheck, CalendarClock, CalendarDays, ChartNoAxesColumn, Check, Hash, Inbox, FolderKanban, KanbanSquare, ListTodo, LogOut, Menu, Plus, RefreshCw, Search, Settings, Sun, Timer, UserCheck, Users, Video, WifiOff, X,
 } from "lucide-react";
 import { api } from "../api";
 import { clearOfflineData, flushQueue, usePendingCount } from "../lib/offline";
@@ -14,6 +14,8 @@ import { CommandPalette } from "./CommandPalette";
 import { DashboardPage } from "./DashboardPage";
 import { MeetingsPage } from "./MeetingsPage";
 import { NotificationsPage } from "./NotificationsPage";
+import { PortfolioPage } from "./PortfolioPage";
+import { ProjectPage } from "./ProjectPage";
 import { SettingsPage } from "./SettingsPage";
 import { WorkspacePage } from "./WorkspacePage";
 import { TaskDetail } from "./TaskDetail";
@@ -198,7 +200,9 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
   const countOf = (n: number) => (n > 0 ? n : null);
   const assignedCount = top.filter((t) => t.assignee_id === user.id).length;
   const unseen = (alerts.data?.unread ?? 0) + (alerts.data?.invites ?? 0);
-  const personalProjects = (projects.data ?? []).filter((p) => p.workspace_id === null);
+  // Archived projects are shelved: hidden here, still reachable from the Projects overview.
+  const shelved = (p: { stage: string }) => p.stage === "archived";
+  const personalProjects = (projects.data ?? []).filter((p) => p.workspace_id === null && !shelved(p));
 
   const wide = /^\/(board|calendar)/.test(pathname);
 
@@ -227,6 +231,7 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
         <nav className="nav-group" style={{ marginTop: 10 }}>
           <NavLink to="/board"><KanbanSquare size={ICON} /><span className="label">Board</span></NavLink>
           <NavLink to="/calendar"><CalendarDays size={ICON} /><span className="label">Calendar</span></NavLink>
+          <NavLink to="/projects"><FolderKanban size={ICON} /><span className="label">Projects</span></NavLink>
           <NavLink to="/meetings"><Video size={ICON} /><span className="label">Meetings</span></NavLink>
           <NavLink to="/dashboard"><ChartNoAxesColumn size={ICON} /><span className="label">Dashboard</span></NavLink>
           <NavLink to="/notifications">
@@ -262,7 +267,7 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
             <NavLink to={`/workspace/${w.id}`} className="ws-link">
               <Users size={ICON} /><span className="label">{w.name}</span>
             </NavLink>
-            {(projects.data ?? []).filter((p) => p.workspace_id === w.id).map((p) => (
+            {(projects.data ?? []).filter((p) => p.workspace_id === w.id && !shelved(p)).map((p) => (
               <NavLink key={p.id} to={`/project/${p.id}`} className="ws-project">
                 <span className="dot" style={{ background: p.color }} /><span className="label">{p.name}</span>
               </NavLink>
@@ -353,7 +358,8 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
             <Route path="/upcoming" element={<TaskList view="upcoming" onOpen={open} />} />
             <Route path="/all" element={<TaskList view="all" onOpen={open} />} />
             <Route path="/assigned" element={<TaskList view="assigned" onOpen={open} />} />
-            <Route path="/project/:id" element={<TaskList view="project" onOpen={open} />} />
+            <Route path="/project/:id" element={<ProjectPage onOpen={open} />} />
+            <Route path="/projects" element={<PortfolioPage />} />
             <Route path="/tag/:name" element={<TaskList view="tag" onOpen={open} />} />
             <Route path="/filter/:id" element={<TaskList view="filter" onOpen={open} />} />
             <Route path="/board" element={<BoardPage onOpen={open} />} />

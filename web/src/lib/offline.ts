@@ -122,7 +122,7 @@ export function enqueue(method: string, url: string, body?: unknown): unknown | 
 
 function buildTempTask(id: number, b: Record<string, unknown>): Task {
   return {
-    id, user_id: currentUser ?? 0, assignee_id: null, workspace_id: null, access: "admin", can_delete: true, comment_count: 0, meeting_count: 0,
+    id, user_id: currentUser ?? 0, assignee_id: null, workspace_id: null, access: "admin", can_delete: true, comment_count: 0, meeting_count: 0, status_id: null,
     parent_id: null, project_id: null, title: "", notes: "", priority: 0, status: "todo", due_at: null, remind_at: null,
     recurrence: null, completed_at: null, created_at: new Date().toISOString().slice(0, 19).replace("T", " "), tags: [],
     position: Number.MAX_SAFE_INTEGER, estimate_min: null, blocked_by: [], blocked: false, subtasks_total: 0, subtasks_done: 0,

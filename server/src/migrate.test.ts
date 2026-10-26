@@ -29,6 +29,15 @@ describe.runIf(backend === "sqlite")("copying a SQLite database to PostgreSQL", 
     await alice.post(`/api/workspaces/${ws}/invites`).send({ email: "pending@example.com", role: "viewer" }).expect(201);
     const project = (await alice.post("/api/projects").send({ name: "Launch", workspace_id: ws }).expect(201)).body.id;
 
+    // statuses (workspace-wide and per-project), life cycle, milestones and updates
+    await alice.post("/api/statuses").send({ workspace_id: ws, name: "In review", category: "doing" }).expect(201);
+    await alice.post("/api/statuses").send({ project_id: project, name: "Blocked upstream", category: "todo" }).expect(201);
+    await alice.patch(`/api/projects/${project}`).send({ description: "Ship it", start_date: "2026-01-05", target_date: "2026-03-31" }).expect(200);
+    await alice.post(`/api/projects/${project}/milestones`).send({ name: "Beta", due_date: "2026-02-01" }).expect(201);
+    await alice.post(`/api/projects/${project}/updates`).send({ health: "at_risk", body: "Vendor delay" }).expect(201);
+    await alice.post(`/api/projects/${project}/stage`).send({ stage: "on_hold", note: "Budget" }).expect(200);
+    await alice.post(`/api/projects/${project}/stage`).send({ stage: "active" }).expect(200);
+
     const first = (await alice.post("/api/tasks").send({ title: "Planned first, nested under a later task", tags: ["a", "b"] }).expect(201)).body;
     const later = (await alice.post("/api/tasks").send({ title: "Created later", project_id: project, assignee_id: (await bob.get("/api/auth/me")).body.id, due_at: "2026-03-04T10:00:00.000Z", recurrence: { freq: "weekly", interval: 1 }, estimate_min: 90 }).expect(201)).body;
     // the first task is moved under a task with a HIGHER id, which a naive in-order copy would reject
@@ -63,6 +72,9 @@ describe.runIf(backend === "sqlite")("copying a SQLite database to PostgreSQL", 
           comments: await get(`/api/tasks/${later.id}/comments`, cookie),
           checklist: await get(`/api/tasks/${later.id}/checklist`, cookie),
           meetings: await get("/api/meetings", cookie),
+          statuses: await get("/api/statuses", cookie),
+          portfolio: await get("/api/portfolio", cookie),
+          overview: await get(`/api/projects/${project}/overview`, cookie),
           taskMeetings: await get(`/api/tasks/${later.id}/meetings`, cookie),
           stats: await get("/api/stats", cookie),
           export: name === "alice" ? await get("/api/export", cookie) : null,
@@ -85,6 +97,9 @@ describe.runIf(backend === "sqlite")("copying a SQLite database to PostgreSQL", 
     expect(report.copied.workspace_invites).toBe(1);
     expect(report.copied.meetings).toBe(2);
     expect(report.copied.meeting_tasks).toBe(2);
+    expect(report.copied.statuses).toBe(8); // 3 defaults + "In review" for the workspace, 3 defaults + "Blocked upstream" for the project
+    expect(report.copied.milestones).toBe(1);
+    expect(report.copied.project_updates).toBe(3);
     expect(sharedMeeting.task_ids).toEqual([later.id]);
 
     const migrated = createApp(target, SECRET);
@@ -105,5 +120,5 @@ describe.runIf(backend === "sqlite")("copying a SQLite database to PostgreSQL", 
     await expect(copySqliteToPostgres(source, target)).rejects.toThrow(/already has accounts/);
     // and only SQLite -> PostgreSQL is supported
     await expect(copySqliteToPostgres(target, source)).rejects.toThrow(/SQLite to PostgreSQL/);
-  });
+  }, 30_000);
 });

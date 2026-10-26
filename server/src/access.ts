@@ -41,18 +41,19 @@ export interface ProjectAccess {
   name: string;
   creatorId: number;
   workspaceId: number | null;
+  stage: string;
   role: Role | null;
   canWrite: boolean;
   canManage: boolean;
 }
 
 export async function projectAccess(db: Queryable, userId: number, projectId: number): Promise<ProjectAccess | null> {
-  const p = await db.get<{ id: number; name: string; user_id: number; workspace_id: number | null }>(
-    "SELECT id, name, user_id, workspace_id FROM projects WHERE id = ?",
+  const p = await db.get<{ id: number; name: string; user_id: number; workspace_id: number | null; stage: string }>(
+    "SELECT id, name, user_id, workspace_id, stage FROM projects WHERE id = ?",
     projectId,
   );
   if (!p) return null;
-  const base = { id: p.id, name: p.name, creatorId: p.user_id, workspaceId: p.workspace_id };
+  const base = { id: p.id, name: p.name, creatorId: p.user_id, workspaceId: p.workspace_id, stage: p.stage };
   if (p.workspace_id === null) {
     return p.user_id === userId ? { ...base, role: null, canWrite: true, canManage: true } : null;
   }
