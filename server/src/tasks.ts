@@ -69,7 +69,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     const ids = rows.map((r) => r.id);
     const nowIso = new Date().toISOString();
 
-    const [tagRows, depRows, subRows, checkRows, timeRows, commentRows] = await Promise.all([
+    const [tagRows, depRows, subRows, checkRows, timeRows, commentRows, meetingRows] = await Promise.all([
       inChunks(ids, (m, a) => q.all<{ task_id: number; name: string }>(`SELECT tt.task_id, g.name FROM task_tags tt JOIN tags g ON g.id = tt.tag_id WHERE tt.task_id IN (${m}) ORDER BY g.name`, ...a)),
       inChunks(ids, (m, a) => q.all<{ task_id: number; id: number; status: string }>(`SELECT d.task_id, d.blocked_by_id AS id, t.status FROM task_deps d JOIN tasks t ON t.id = d.blocked_by_id WHERE d.task_id IN (${m})`, ...a)),
       inChunks(ids, (m, a) =>
@@ -90,6 +90,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
         ),
       ),
       inChunks(ids, (m, a) => q.all<{ task_id: number; n: number }>(`SELECT task_id, COUNT(*) AS n FROM comments WHERE task_id IN (${m}) GROUP BY task_id`, ...a)),
+      inChunks(ids, (m, a) => q.all<{ task_id: number; n: number }>(`SELECT task_id, COUNT(*) AS n FROM meeting_tasks WHERE task_id IN (${m}) GROUP BY task_id`, ...a)),
     ]);
 
     const projectIds = [...new Set(rows.map((r) => r.project_id).filter((p): p is number => p !== null))];
@@ -106,6 +107,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     const checks = new Map(checkRows.map((r) => [r.task_id, r]));
     const times = new Map(timeRows.map((r) => [r.task_id, r]));
     const comments = new Map(commentRows.map((r) => [r.task_id, r.n]));
+    const meetings = new Map(meetingRows.map((r) => [r.task_id, r.n]));
 
     return rows.map(({ recurrence_rule, ...r }) => {
       const taskDeps = deps.get(r.id) ?? [];
@@ -133,6 +135,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
         access,
         can_delete: access === "admin" || (access === "write" && r.user_id === userId),
         comment_count: comments.get(r.id) ?? 0,
+        meeting_count: meetings.get(r.id) ?? 0,
       };
     });
   }
@@ -423,6 +426,8 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
           ...family, ...family, ...family, ...family,
         );
         for (const d of outside) await t.run("DELETE FROM task_deps WHERE task_id = ? AND blocked_by_id = ?", d.task_id, d.blocked_by_id);
+        // A meeting can only be linked to tasks in its own place, so links don't survive a move across the boundary.
+        await t.run(`DELETE FROM meeting_tasks WHERE task_id IN (${m})`, ...family);
         const title = (b.title ?? current.title) as string;
         await logActivity(t, ta.workspaceId, me, "task_moved", taskId, { title, away: true });
         await logActivity(t, newWs, me, "task_moved", taskId, { title });

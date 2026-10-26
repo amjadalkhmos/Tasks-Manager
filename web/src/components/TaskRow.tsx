@@ -1,4 +1,4 @@
-import { CalendarDays, Clock, CornerDownRight, ListChecks, ListTree, Lock, MessageSquare, Repeat, Timer } from "lucide-react";
+import { CalendarDays, Clock, CornerDownRight, ListChecks, ListTree, Lock, MessageSquare, Repeat, Timer, Video } from "lucide-react";
 import type { Task } from "../api";
 import { usePeople } from "../lib/people";
 import { PRIORITY, describeRecurrence, dueState, formatDue, formatMinutes } from "../lib/tasks";
@@ -48,6 +48,9 @@ export function TaskRow({ task: t, onOpen, onToggle, nested }: Props) {
         )}
         {t.comment_count > 0 && (
           <span title={`${t.comment_count} comment${t.comment_count === 1 ? "" : "s"}`}><MessageSquare size={ICON} data-icon="comments" />{t.comment_count}</span>
+        )}
+        {t.meeting_count > 0 && (
+          <span title={`${t.meeting_count} meeting${t.meeting_count === 1 ? "" : "s"}`}><Video size={ICON} data-icon="meetings" />{t.meeting_count}</span>
         )}
         {t.estimate_min !== null && (
           <span title="Tracked / estimated"><Clock size={ICON} data-icon="estimate" />{formatMinutes(t.tracked_min)}/{formatMinutes(t.estimate_min)}</span>

@@ -53,6 +53,7 @@ describe("export and import", () => {
     await agent.post(`/api/tasks/${parent.id}/checklist`).send({ text: "boxes" }).expect(201);
     await agent.post(`/api/tasks/${child.id}/deps`).send({ blocked_by_id: rec.id }).expect(201);
     await agent.post("/api/filters").send({ name: "Urgent", query: { tag: "urgent" } }).expect(201);
+    await agent.post("/api/meetings").send({ title: "Kickoff", starts_at: "2026-05-01T08:00:00.000Z", location: "Room 1", url: "https://meet.example.com/k", task_ids: [parent.id, rec.id] }).expect(201);
 
     const exported = (await agent.get("/api/export").expect(200)).body;
     expect(exported.version).toBe(1);
@@ -60,7 +61,7 @@ describe("export and import", () => {
 
     const other = await login(app, "b@example.com");
     const res = (await other.post("/api/import?format=json").send(exported).expect(201)).body;
-    expect(res).toMatchObject({ tasks: 3, projects: 1, filters: 1, warnings: [] });
+    expect(res).toMatchObject({ tasks: 3, projects: 1, filters: 1, meetings: 1, warnings: [] });
 
     const tasks = (await other.get("/api/tasks")).body as { id: number; title: string; parent_id: number | null; [k: string]: unknown }[];
     const byTitle = Object.fromEntries(tasks.map((t) => [t.title, t]));
@@ -70,6 +71,11 @@ describe("export and import", () => {
     expect(byTitle["Water plants"].recurrence).toEqual({ freq: "weekly", interval: 2, weekdays: [1] });
     expect(byTitle["Pack"].blocked_by).toEqual([byTitle["Water plants"].id]);
     expect((await other.get("/api/filters")).body).toHaveLength(1);
+    const meetings = (await other.get("/api/meetings")).body as { title: string; location: string; url: string; ends_at: string; task_ids: number[] }[];
+    expect(meetings).toHaveLength(1);
+    expect(meetings[0]).toMatchObject({ title: "Kickoff", location: "Room 1", url: "https://meet.example.com/k", ends_at: "2026-05-01T08:30:00.000Z" });
+    expect(meetings[0].task_ids.sort()).toEqual([byTitle["Move"].id, byTitle["Water plants"].id].sort());
+    expect(exported.meetings).toHaveLength(1);
     expect((await other.get("/api/projects")).body.map((p: { name: string }) => p.name)).toEqual(["Home"]);
     // the original account is untouched
     expect((await agent.get("/api/tasks")).body).toHaveLength(3);

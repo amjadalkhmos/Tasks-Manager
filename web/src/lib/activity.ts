@@ -20,6 +20,10 @@ export function describeActivity(a: ActivityItem, nameOf: (id: number | null | u
     case "member_left": return "left the workspace";
     case "member_removed": return `removed ${nameOf(d.user_id as number)}`;
     case "role_changed": return `changed ${nameOf(d.user_id as number)} from ${d.from} to ${d.to}`;
+    case "meeting_created": return `scheduled the meeting ${q(d.title)}`;
+    case "meeting_deleted": return `deleted the meeting ${q(d.title)}`;
+    case "meeting_linked": return `linked the meeting ${q(d.title)} to ${q(d.task_title)}`;
+    case "meeting_unlinked": return `unlinked the meeting ${q(d.title)} from ${q(d.task_title)}`;
     case "workspace_renamed": return `renamed the workspace from ${q(d.from)} to ${q(d.to)}`;
     default: return a.kind.replace(/_/g, " ");
   }

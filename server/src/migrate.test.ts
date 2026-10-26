@@ -39,6 +39,9 @@ describe.runIf(backend === "sqlite")("copying a SQLite database to PostgreSQL", 
     const dep = (await alice.post("/api/tasks").send({ title: "Depends on first" }).expect(201)).body;
     await alice.post(`/api/tasks/${dep.id}/deps`).send({ blocked_by_id: first.id }).expect(201);
     await alice.post("/api/filters").send({ name: "Mine", query: { tag: "a" } }).expect(201);
+    // a shared meeting linked to a shared task, and a private one linked to a private task
+    const sharedMeeting = (await alice.post("/api/meetings").send({ title: "Planning", starts_at: "2026-03-04T10:00:00.000Z", workspace_id: ws, task_ids: [later.id], location: "Room 1", url: "https://meet.example.com/x" }).expect(201)).body;
+    await alice.post("/api/meetings").send({ title: "Dentist", starts_at: "2026-03-05T09:00:00.000Z", task_ids: [first.id] }).expect(201);
     await alice.post(`/api/tasks/${first.id}/timer/start`).expect(201);
     await alice.post("/api/timer/stop").expect(200);
     await alice.post(`/api/tasks/${later.id}/complete`).expect(200); // spawns the next occurrence
@@ -59,6 +62,8 @@ describe.runIf(backend === "sqlite")("copying a SQLite database to PostgreSQL", 
           activity: await get(`/api/workspaces/${ws}/activity?limit=100`, cookie),
           comments: await get(`/api/tasks/${later.id}/comments`, cookie),
           checklist: await get(`/api/tasks/${later.id}/checklist`, cookie),
+          meetings: await get("/api/meetings", cookie),
+          taskMeetings: await get(`/api/tasks/${later.id}/meetings`, cookie),
           stats: await get("/api/stats", cookie),
           export: name === "alice" ? await get("/api/export", cookie) : null,
         };
@@ -78,6 +83,9 @@ describe.runIf(backend === "sqlite")("copying a SQLite database to PostgreSQL", 
     expect(report.copied.tasks).toBeGreaterThanOrEqual(5);
     expect(report.copied.comments).toBe(1);
     expect(report.copied.workspace_invites).toBe(1);
+    expect(report.copied.meetings).toBe(2);
+    expect(report.copied.meeting_tasks).toBe(2);
+    expect(sharedMeeting.task_ids).toEqual([later.id]);
 
     const migrated = createApp(target, SECRET);
     const after = await snapshot(migrated, cookies);

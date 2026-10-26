@@ -134,3 +134,61 @@ export const myArgs = (userId: number): number[] => [userId, userId, userId, use
 export async function isMemberAtLeast(db: Queryable, workspaceId: number, userId: number, min: Role): Promise<boolean> {
   return atLeast(await roleIn(db, workspaceId, userId), min);
 }
+
+// ---------- meetings ----------
+
+export type MeetingRow = Record<string, any> & {
+  id: number;
+  user_id: number;
+  workspace_id: number | null;
+  title: string;
+  starts_at: string;
+  ends_at: string;
+};
+
+export interface MeetingAccess {
+  row: MeetingRow;
+  workspaceId: number | null;
+  role: Role | null;
+  canWrite: boolean;
+  canDelete: boolean;
+  canManage: boolean;
+}
+
+/** Meetings follow the same rules as tasks: private to their creator, or shared with a workspace's members by role. */
+export async function meetingAccess(db: Queryable, userId: number, meetingId: number): Promise<MeetingAccess | null> {
+  if (!Number.isSafeInteger(meetingId)) return null;
+  const row = await db.get<MeetingRow>("SELECT * FROM meetings WHERE id = ?", meetingId);
+  if (!row) return null;
+  if (row.workspace_id === null) {
+    return row.user_id === userId ? { row, workspaceId: null, role: null, canWrite: true, canDelete: true, canManage: true } : null;
+  }
+  const role = await roleIn(db, row.workspace_id, userId);
+  if (!role) return null;
+  return {
+    row,
+    workspaceId: row.workspace_id,
+    role,
+    canWrite: atLeast(role, "member"),
+    canManage: atLeast(role, "admin"),
+    canDelete: atLeast(role, "admin") || (atLeast(role, "member") && row.user_id === userId),
+  };
+}
+
+export async function readableMeeting(db: Queryable, userId: number, meetingId: number): Promise<MeetingAccess> {
+  const a = await meetingAccess(db, userId, meetingId);
+  if (!a) throw new HttpError(404, "Meeting not found");
+  return a;
+}
+
+export async function writableMeeting(db: Queryable, userId: number, meetingId: number): Promise<MeetingAccess> {
+  const a = await readableMeeting(db, userId, meetingId);
+  if (!a.canWrite) throw FORBIDDEN();
+  return a;
+}
+
+/** SQL (with two `?` placeholders, both the user id) that is true for meetings the user can see. */
+export function visibleMeetingsSql(alias = "m"): string {
+  return `((${alias}.workspace_id IS NULL AND ${alias}.user_id = ?)
+    OR ${alias}.workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id = ?))`;
+}

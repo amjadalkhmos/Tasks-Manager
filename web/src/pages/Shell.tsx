@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Bell, BookmarkCheck, CalendarClock, CalendarDays, ChartNoAxesColumn, Check, Hash, Inbox, KanbanSquare, ListTodo, LogOut, Menu, Plus, RefreshCw, Search, Settings, Sun, Timer, UserCheck, Users, WifiOff, X,
+  Bell, BookmarkCheck, CalendarClock, CalendarDays, ChartNoAxesColumn, Check, Hash, Inbox, KanbanSquare, ListTodo, LogOut, Menu, Plus, RefreshCw, Search, Settings, Sun, Timer, UserCheck, Users, Video, WifiOff, X,
 } from "lucide-react";
 import { api } from "../api";
 import { clearOfflineData, flushQueue, usePendingCount } from "../lib/offline";
@@ -12,6 +12,7 @@ import { BoardPage } from "./BoardPage";
 import { CalendarPage } from "./CalendarPage";
 import { CommandPalette } from "./CommandPalette";
 import { DashboardPage } from "./DashboardPage";
+import { MeetingsPage } from "./MeetingsPage";
 import { NotificationsPage } from "./NotificationsPage";
 import { SettingsPage } from "./SettingsPage";
 import { WorkspacePage } from "./WorkspacePage";
@@ -226,6 +227,7 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
         <nav className="nav-group" style={{ marginTop: 10 }}>
           <NavLink to="/board"><KanbanSquare size={ICON} /><span className="label">Board</span></NavLink>
           <NavLink to="/calendar"><CalendarDays size={ICON} /><span className="label">Calendar</span></NavLink>
+          <NavLink to="/meetings"><Video size={ICON} /><span className="label">Meetings</span></NavLink>
           <NavLink to="/dashboard"><ChartNoAxesColumn size={ICON} /><span className="label">Dashboard</span></NavLink>
           <NavLink to="/notifications">
             <Bell size={ICON} /><span className="label">Notifications</span>
@@ -356,6 +358,7 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
             <Route path="/filter/:id" element={<TaskList view="filter" onOpen={open} />} />
             <Route path="/board" element={<BoardPage onOpen={open} />} />
             <Route path="/calendar" element={<CalendarPage onOpen={open} />} />
+            <Route path="/meetings" element={<MeetingsPage onOpenTask={open} />} />
             <Route path="/dashboard" element={<DashboardPage onOpen={open} />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/notifications" element={<NotificationsPage onOpenTask={open} />} />

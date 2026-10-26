@@ -3,6 +3,7 @@ import { z } from "zod";
 import { csvRecords, parseCsv, toCsv } from "./csv.js";
 import { inChunks, type DB, type Queryable } from "./db.js";
 import { HttpError } from "./http-error.js";
+import { isHttpUrl } from "./meetings.js";
 import { parseRule, recurrenceSchema, type Recurrence } from "./recurrence.js";
 
 interface Deps {
@@ -74,7 +75,16 @@ export async function buildExport(db: Queryable, userId: number) {
     query: JSON.parse(f.query_json) as Record<string, string | number>,
   }));
 
-  return { version: 1, exported_at: new Date().toISOString(), projects, tasks, filters };
+  // Private meetings made in the app, with the tasks they are linked to. (Shared meetings belong to the workspace, and
+  // meetings that come from a calendar are fetched again by the calendar sync, so neither is part of a personal export.)
+  const meetingRows = await db.all<Record<string, any>>("SELECT * FROM meetings WHERE user_id = ? AND workspace_id IS NULL AND source = 'local' ORDER BY id", userId);
+  const meetingLinks = await inChunks(meetingRows.map((m) => m.id), (m, a) => db.all<{ meeting_id: number; task_id: number }>(`SELECT meeting_id, task_id FROM meeting_tasks WHERE meeting_id IN (${m}) ORDER BY task_id`, ...a));
+  const meetings = meetingRows.map((m) => ({
+    id: m.id as number, title: m.title as string, notes: m.notes as string, starts_at: m.starts_at as string, ends_at: m.ends_at as string,
+    location: m.location as string, url: m.url as string, task_ids: meetingLinks.filter((l) => l.meeting_id === m.id).map((l) => l.task_id),
+  }));
+
+  return { version: 1, exported_at: new Date().toISOString(), projects, tasks, filters, meetings };
 }
 
 export async function exportCsv(db: Queryable, userId: number): Promise<string> {
@@ -111,10 +121,22 @@ interface Incoming {
   blockedByRefs?: string[];
 }
 
+interface IncomingMeeting {
+  title: string;
+  notes?: string;
+  starts_at: string;
+  ends_at: string;
+  location?: string;
+  url?: string;
+  /** `ref`s of the imported tasks this meeting is linked to. */
+  taskRefs: string[];
+}
+
 interface ImportResult {
   tasks: number;
   projects: number;
   filters: number;
+  meetings: number;
   warnings: string[];
 }
 
@@ -137,7 +159,14 @@ export function parseDate(raw: string, tz: number): string | null {
   return null;
 }
 
-async function insertAll(db: DB, userId: number, items: Incoming[], filters: { name: string; query: Record<string, string | number> }[], defaultProject?: string): Promise<ImportResult> {
+async function insertAll(
+  db: DB,
+  userId: number,
+  items: Incoming[],
+  filters: { name: string; query: Record<string, string | number> }[],
+  defaultProject?: string,
+  meetings: IncomingMeeting[] = [],
+): Promise<ImportResult> {
   if (items.length > MAX_TASKS) throw new HttpError(413, `Too many tasks (max ${MAX_TASKS} per import)`);
   const warnings: string[] = [];
   const projectIds = new Map<string, number>();
@@ -204,9 +233,19 @@ async function insertAll(db: DB, userId: number, items: Incoming[], filters: { n
       }
     }
     for (const f of filters) await t.run("INSERT INTO saved_filters (user_id, name, query_json) VALUES (?, ?, ?)", userId, f.name.slice(0, 100), JSON.stringify(f.query));
+    for (const m of meetings) {
+      const meetingId = await t.insert(
+        "INSERT INTO meetings (user_id, title, notes, starts_at, ends_at, location, url) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        userId, m.title.slice(0, 200), (m.notes ?? "").slice(0, 10000), m.starts_at, m.ends_at, (m.location ?? "").slice(0, 200), isHttpUrl(m.url ?? "") ? m.url! : "",
+      );
+      for (const ref of new Set(m.taskRefs)) {
+        const taskId = idByRef.get(ref);
+        if (taskId) await t.run("INSERT INTO meeting_tasks (meeting_id, task_id) VALUES (?, ?) ON CONFLICT DO NOTHING", meetingId, taskId);
+      }
+    }
   });
 
-  return { tasks: items.length, projects: projectsCreated, filters: filters.length, warnings };
+  return { tasks: items.length, projects: projectsCreated, filters: filters.length, meetings: meetings.length, warnings };
 }
 
 const ownSchema = z.object({
@@ -235,6 +274,20 @@ const ownSchema = z.object({
     )
     .max(MAX_TASKS),
   filters: z.array(z.object({ name: z.string(), query: z.record(z.string(), z.union([z.string(), z.number()])) })).default([]),
+  meetings: z
+    .array(
+      z.object({
+        title: z.string().min(1),
+        notes: z.string().optional(),
+        starts_at: iso,
+        ends_at: iso,
+        location: z.string().optional(),
+        url: z.string().optional(),
+        task_ids: z.array(z.number()).default([]),
+      }),
+    )
+    .max(MAX_TASKS)
+    .default([]),
 });
 
 function fromOwn(body: unknown) {
@@ -248,7 +301,7 @@ function fromOwn(body: unknown) {
     recurrence: t.recurrence, estimate_min: t.estimate_min, position: t.position, completed_at: t.completed_at,
     tags: t.tags, checklist: t.checklist, blockedByRefs: (t.blocked_by ?? []).map(String),
   }));
-  return { items, filters: d.filters };
+  return { items, filters: d.filters, meetings: d.meetings.map((m) => ({ ...m, taskRefs: m.task_ids.map(String) })) };
 }
 
 const PRIORITY_WORDS: Record<string, number> = { none: 0, low: 1, medium: 2, med: 2, high: 3 };
@@ -376,8 +429,8 @@ export function registerDataIo(app: Express, { db, auth, uid }: Deps) {
 
       let result: ImportResult;
       if (q.format === "json") {
-        const { items, filters } = fromOwn(req.body);
-        result = await insertAll(db, uid(req), items, filters);
+        const { items, filters, meetings } = fromOwn(req.body);
+        result = await insertAll(db, uid(req), items, filters, undefined, meetings);
       } else if (q.format === "trello") {
         const { items, warnings } = fromTrello(req.body);
         result = await insertAll(db, uid(req), items, [], "Trello import");

@@ -16,7 +16,11 @@ export type ActivityKind =
   | "member_left"
   | "member_removed"
   | "role_changed"
-  | "workspace_renamed";
+  | "workspace_renamed"
+  | "meeting_created"
+  | "meeting_deleted"
+  | "meeting_linked"
+  | "meeting_unlinked";
 
 export type AlertKind = "assigned" | "mentioned" | "commented" | "invite_accepted" | "removed";
 

@@ -19,6 +19,7 @@ export interface Task {
   access: "read" | "write" | "admin";
   can_delete: boolean;
   comment_count: number;
+  meeting_count: number;
   project_id: number | null;
   parent_id: number | null;
   title: string;
@@ -41,6 +42,37 @@ export interface Task {
   checklist_done: number;
   tracked_min: number;
   timer_running: boolean;
+}
+
+export interface Meeting {
+  id: number;
+  /** null for a private meeting. */
+  workspace_id: number | null;
+  created_by: number;
+  title: string;
+  notes: string;
+  starts_at: string;
+  ends_at: string;
+  location: string;
+  url: string;
+  /** "local" for meetings made here; "google" is reserved for meetings that come from a linked calendar. */
+  source: "local" | "google";
+  external_url: string | null;
+  created_at: string;
+  task_ids: number[];
+  access: "read" | "write" | "admin";
+  can_delete: boolean;
+}
+
+export interface NewMeeting {
+  title: string;
+  starts_at: string;
+  ends_at?: string;
+  location?: string;
+  url?: string;
+  notes?: string;
+  workspace_id?: number | null;
+  task_ids?: number[];
 }
 
 export interface ChecklistItem {
@@ -194,6 +226,7 @@ export interface ImportSummary {
   tasks: number;
   projects: number;
   filters: number;
+  meetings?: number;
   warnings: string[];
 }
 
@@ -274,6 +307,17 @@ export const api = {
   stopTimer: () => request<Task | null>("POST", "/timer/stop"),
 
   stats: () => request<Stats>("GET", `/stats?offset=${-new Date().getTimezoneOffset()}`),
+
+  meetings: (query: Record<string, string | number> = {}) => {
+    const qs = new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]));
+    return request<Meeting[]>("GET", `/meetings?${qs}`);
+  },
+  taskMeetings: (taskId: number) => request<Meeting[]>("GET", `/tasks/${taskId}/meetings`),
+  createMeeting: (m: NewMeeting) => request<Meeting>("POST", "/meetings", m),
+  updateMeeting: (id: number, m: Partial<Pick<Meeting, "title" | "starts_at" | "ends_at" | "location" | "url" | "notes">>) => request<Meeting>("PATCH", `/meetings/${id}`, m),
+  deleteMeeting: (id: number) => request<void>("DELETE", `/meetings/${id}`),
+  linkMeeting: (id: number, taskId: number) => request<Meeting>("POST", `/meetings/${id}/tasks`, { task_id: taskId }),
+  unlinkMeeting: (id: number, taskId: number) => request<Meeting>("DELETE", `/meetings/${id}/tasks/${taskId}`),
 
   people: () => request<Person[]>("GET", "/people"),
 

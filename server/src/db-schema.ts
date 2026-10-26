@@ -171,11 +171,36 @@ CREATE TABLE IF NOT EXISTS alerts (
   created_at TEXT NOT NULL DEFAULT ${NOW_ISO},
   read_at TEXT
 );
+
+-- Meetings live in the app. A meeting is private to its creator (workspace_id NULL) or shared with a workspace, and can
+-- be linked to any number of tasks in the same place. source/external_* are reserved for calendars: a meeting that comes
+-- from Google Calendar will have source 'google' plus the event's id and link, so syncing can update it instead of
+-- duplicating it.
+CREATE TABLE IF NOT EXISTS meetings (
+  id ${ID},
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  notes TEXT NOT NULL DEFAULT '',
+  starts_at TEXT NOT NULL,
+  ends_at TEXT NOT NULL,
+  location TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'local' CHECK (source IN ('local','google')),
+  external_id TEXT,
+  external_url TEXT,
+  created_at TEXT NOT NULL DEFAULT ${NOW_ISO}
+);
+CREATE TABLE IF NOT EXISTS meeting_tasks (
+  meeting_id INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  PRIMARY KEY (meeting_id, task_id)
+);
 `;
 }
 
 /** Indexes are created after any column migrations, because some are on columns older SQLite files gain later. */
-const INDEXES = `
+export const INDEXES = `
 CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_remind ON tasks(remind_at) WHERE reminded_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assignee_id);
@@ -189,6 +214,10 @@ CREATE INDEX IF NOT EXISTS idx_time_task ON time_entries(task_id);
 CREATE INDEX IF NOT EXISTS idx_activity_ws ON activity(workspace_id, id);
 CREATE INDEX IF NOT EXISTS idx_activity_task ON activity(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_id, id);
+CREATE INDEX IF NOT EXISTS idx_meetings_user ON meetings(user_id, starts_at);
+CREATE INDEX IF NOT EXISTS idx_meetings_ws ON meetings(workspace_id, starts_at);
+CREATE INDEX IF NOT EXISTS idx_meeting_tasks_task ON meeting_tasks(task_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_meetings_external ON meetings(user_id, source, external_id) WHERE external_id IS NOT NULL;
 `;
 
 /**

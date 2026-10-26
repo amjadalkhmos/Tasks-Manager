@@ -4,20 +4,14 @@ import { ArrowUp, Bell, CalendarDays, Eye, Flag, Folder, Hash, History, Lock, Pl
 import { api, type Recurrence, type Task } from "../api";
 import { Avatar } from "../components/Avatar";
 import { Comments } from "../components/Comments";
+import { MeetingDrawer } from "../components/MeetingDrawer";
+import { TaskMeetings } from "../components/TaskMeetings";
 import { describeActivity } from "../lib/activity";
 import { usePeople } from "../lib/people";
+import { fromLocalInput, toLocalInput } from "../lib/datetime";
 import { formatMinutes } from "../lib/tasks";
 import { timeAgo } from "../lib/time";
 import { useTaskActions } from "../lib/useTaskActions";
-
-// <input type="datetime-local"> works in local time without a zone; convert to and from ISO.
-const toLocalInput = (iso: string | null) => {
-  if (!iso) return "";
-  const d = new Date(iso);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-};
-const fromLocalInput = (v: string) => (v ? new Date(v).toISOString() : null);
 
 const WEEKDAYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 
@@ -107,6 +101,7 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
   const wsId = task?.workspace_id ?? null;
   const wsDetail = useQuery({ queryKey: ["workspace", wsId], queryFn: () => api.workspace(wsId!), enabled: wsId !== null });
   const [showHistory, setShowHistory] = useState(false);
+  const [editMeeting, setEditMeeting] = useState<number | null>(null);
   const history = useQuery({ queryKey: ["task-activity", id], queryFn: () => api.taskActivity(id), enabled: showHistory && wsId !== null });
 
   const [draft, setDraft] = useState<Task | null>(null);
@@ -424,6 +419,8 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
             )}
           </section>
 
+          <TaskMeetings task={task} readOnly={readOnly} onEdit={setEditMeeting} />
+
           <section className="panel-section">
             <h3>Blocked by</h3>
             <ul className="tasks compact">
@@ -494,6 +491,11 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
           )}
         </div>
       </aside>
+      {editMeeting !== null && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <MeetingDrawer meetingId={editMeeting} onClose={() => setEditMeeting(null)} onOpenTask={(t) => (setEditMeeting(null), onOpen(t))} />
+        </div>
+      )}
     </div>
   );
 }
