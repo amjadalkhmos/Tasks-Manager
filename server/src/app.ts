@@ -36,7 +36,9 @@ export function createApp(db: DB, secret: string, options: AppOptions = {}) {
     res.cookie(COOKIE, signToken(userId, secret), {
       httpOnly: true,
       sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
+      // Secure cookies only travel over HTTPS (browsers exempt localhost). Set COOKIE_SECURE=false to run over plain HTTP,
+      // e.g. on a home network without a TLS proxy.
+      secure: (process.env.COOKIE_SECURE ?? String(process.env.NODE_ENV === "production")) === "true",
       maxAge: 7 * 24 * 3600 * 1000,
     });
 

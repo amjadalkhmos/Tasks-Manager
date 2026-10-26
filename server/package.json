@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p .",
+    "start": "node dist/index.js",
     "test": "vitest run"
   },
   "dependencies": {

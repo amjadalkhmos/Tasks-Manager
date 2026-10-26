@@ -1,0 +1,27 @@
+# Run the app with:  docker compose up -d --build
+# Then open http://localhost:3000
+#
+# Copy .env.example to .env and set JWT_SECRET first. Everything else is optional.
+services:
+  tasks:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in a .env file (see .env.example)}
+      # Set to "false" only when serving over plain HTTP (no HTTPS proxy), otherwise browsers drop the login cookie.
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # Optional: AI helpers.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-claude-sonnet-5-5}
+      # Optional: Google Calendar / Gmail. All four are needed together.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      TOKEN_ENC_KEY: ${TOKEN_ENC_KEY:-}
+    volumes:
+      - tasks-data:/data
+    restart: unless-stopped
+
+volumes:
+  tasks-data:
