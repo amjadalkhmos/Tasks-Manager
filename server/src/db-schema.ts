@@ -268,7 +268,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_meetings_external ON meetings(user_id, sou
  * Databases created by earlier versions lack some columns (`CREATE TABLE IF NOT EXISTS` leaves an existing table as it
  * was), so columns added since are added here. This applies to SQLite files and to PostgreSQL databases alike.
  */
-const ADDED_COLUMNS: Record<string, [string, string][]> = {
+export const ADDED_COLUMNS: Record<string, [string, string][]> = {
   tasks: [
     ["position", "REAL NOT NULL DEFAULT 0"],
     ["estimate_min", "INTEGER"],
