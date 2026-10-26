@@ -265,10 +265,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_meetings_external ON meetings(user_id, sou
 `;
 
 /**
- * SQLite files created by earlier versions lack some columns. (PostgreSQL databases are always created by the
- * current schema, so they need no migrations.)
+ * Databases created by earlier versions lack some columns (`CREATE TABLE IF NOT EXISTS` leaves an existing table as it
+ * was), so columns added since are added here. This applies to SQLite files and to PostgreSQL databases alike.
  */
-const SQLITE_COLUMNS: Record<string, [string, string][]> = {
+const ADDED_COLUMNS: Record<string, [string, string][]> = {
   tasks: [
     ["position", "REAL NOT NULL DEFAULT 0"],
     ["estimate_min", "INTEGER"],
@@ -288,10 +288,12 @@ const SQLITE_COLUMNS: Record<string, [string, string][]> = {
 
 export async function createSchema(db: Queryable): Promise<void> {
   await db.exec(schemaSql(db.dialect));
-  if (db.dialect === "sqlite") {
-    for (const [table, columns] of Object.entries(SQLITE_COLUMNS)) {
+  for (const [table, columns] of Object.entries(ADDED_COLUMNS)) {
+    if (db.dialect === "sqlite") {
       const have = new Set((await db.all<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`)).map((c) => c.name));
       for (const [name, def] of columns) if (!have.has(name)) await db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`);
+    } else {
+      for (const [name, def] of columns) await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${name} ${def.replace(/REAL/, "DOUBLE PRECISION")}`);
     }
   }
   await db.exec(INDEXES);
