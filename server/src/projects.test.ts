@@ -333,14 +333,15 @@ describe("health updates, milestones and the overview", () => {
     await t.carol.post(`/api/projects/${t.project}/milestones`).send({ name: "Someday" }).expect(201);
     await t.carol.post(`/api/projects/${t.project}/milestones`).send({ name: "Bad", due_date: "tomorrow" }).expect(400);
 
-    const done = (await t.carol.patch(`/api/milestones/${m1.id}`).send({ done: true }).expect(200)).body as Json;
+    await t.carol.post(`/api/milestones/${m1.id}/sign-off`).send({ outcome: "achieved" }).expect(403); // deciding is for the lead or a manager
+    const done = (await t.bob.post(`/api/milestones/${m1.id}/sign-off`).send({ outcome: "achieved" }).expect(200)).body as Json;
     expect(done.completed_at).toBeTruthy();
-    expect(((await t.carol.patch(`/api/milestones/${m1.id}`).send({ done: false }).expect(200)).body as Json).completed_at).toBeNull();
+    expect(((await t.bob.post(`/api/milestones/${m1.id}/reopen`).expect(200)).body as Json).completed_at).toBeNull();
     await t.carol.patch(`/api/milestones/${m2.id}`).send({ name: "Go live", due_date: null }).expect(200);
-    await t.dave.patch(`/api/milestones/${m2.id}`).send({ done: true }).expect(403);
-    await t.erin.patch(`/api/milestones/${m2.id}`).send({ done: true }).expect(404);
+    await t.dave.patch(`/api/milestones/${m2.id}`).send({ name: "x" }).expect(403);
+    await t.erin.patch(`/api/milestones/${m2.id}`).send({ name: "x" }).expect(404);
     await t.erin.delete(`/api/milestones/${m2.id}`).expect(404);
-    await t.carol.patch("/api/milestones/abc").send({ done: true }).expect(404);
+    await t.carol.patch("/api/milestones/abc").send({ name: "x" }).expect(404);
 
     const o = (await t.dave.get(`/api/projects/${t.project}/overview`).expect(200)).body as Json;
     expect(o.milestones.map((m: Json) => m.name)).toEqual(["Beta", "Go live", "Someday"]); // dated first, then by order
@@ -364,7 +365,7 @@ describe("health updates, milestones and the overview", () => {
     expect(Object.fromEntries(o.by_status.map((s: Json) => [s.name, s.count]))).toEqual({ "To do": 1, Doing: 0, Done: 1, Review: 1 });
     expect(o.workload).toEqual(expect.arrayContaining([{ assignee_id: t.ids.carol, open: 1 }, { assignee_id: null, open: 1 }]));
     expect(o.time.estimate_min).toBe(90);
-    expect(o.access).toEqual({ can_write: false, can_manage: false });
+    expect(o.access).toEqual({ can_write: false, can_manage: false, can_sign_off: false });
     expect(o.transitions).toEqual(["on_hold", "completed", "archived"]);
     await t.erin.get(`/api/projects/${t.project}/overview`).expect(404);
     await t.dave.get("/api/projects/abc/overview").expect(404);

@@ -1,3 +1,4 @@
+import { MilestoneBadge } from "../components/MilestonePanel";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -106,7 +107,7 @@ export function PortfolioPage() {
                     <td>
                       {r.next_milestone ? (
                         <>
-                          {r.next_milestone.name}
+                          {r.next_milestone.name}{r.next_milestone.state === "at_risk" && <> <MilestoneBadge state="at_risk" /></>}
                           <div className="muted small">{formatDay(r.next_milestone.due_date)}</div>
                         </>
                       ) : (

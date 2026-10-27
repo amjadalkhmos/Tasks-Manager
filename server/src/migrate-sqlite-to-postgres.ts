@@ -11,13 +11,13 @@ import { openDb, type DB, type Queryable } from "./db.js";
 
 /** Dependency order: a table appears after every table it references. */
 const TABLES = [
-  "users", "workspaces", "workspace_members", "workspace_invites", "projects", "statuses", "project_updates", "milestones", "sales_access", "pipelines", "pipeline_stages", "accounts", "contacts", "leads", "deals", "sales_activities", "lead_forms", "tags", "tasks", "task_tags", "task_deps",
+  "users", "workspaces", "workspace_members", "workspace_invites", "projects", "statuses", "project_updates", "milestones", "milestone_moves", "milestone_deps", "sales_access", "pipelines", "pipeline_stages", "accounts", "contacts", "leads", "deals", "sales_activities", "lead_forms", "tags", "tasks", "task_tags", "task_deps",
   "checklist_items", "saved_filters", "time_entries", "integrations", "gcal_links", "gmail_seen", "comments",
   "comment_mentions", "activity", "alerts", "meetings", "meeting_tasks",
 ] as const;
 
 /** Tables whose primary key is a generated `id`; PostgreSQL's counters must be moved past the copied ids. */
-const WITH_ID = new Set(["users", "workspaces", "workspace_invites", "projects", "statuses", "project_updates", "milestones", "tags", "tasks", "checklist_items", "saved_filters", "time_entries", "comments", "activity", "alerts", "meetings", "sales_access", "pipelines", "pipeline_stages", "accounts", "contacts", "leads", "deals", "sales_activities", "lead_forms"]);
+const WITH_ID = new Set(["users", "workspaces", "workspace_invites", "projects", "statuses", "project_updates", "milestones", "milestone_moves", "tags", "tasks", "checklist_items", "saved_filters", "time_entries", "comments", "activity", "alerts", "meetings", "sales_access", "pipelines", "pipeline_stages", "accounts", "contacts", "leads", "deals", "sales_activities", "lead_forms"]);
 
 export interface CopyReport {
   copied: Record<string, number>;

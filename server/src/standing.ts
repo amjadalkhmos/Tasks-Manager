@@ -18,9 +18,18 @@ export interface TaskLite {
 export interface MilestoneLite {
   id: number;
   name: string;
+  /** The forecast date: the current best guess. */
   due_date: string | null;
   completed_at: string | null;
+  /** What was first promised. */
+  baseline_date?: string | null;
+  /** The decision made by the project's lead or a manager; null while the milestone is open. */
+  outcome?: "achieved" | "missed" | null;
+  /** Milestones that should be achieved before this one. */
+  depends_on?: number[];
 }
+
+export type MilestoneState = "upcoming" | "at_risk" | "achieved" | "missed";
 
 export interface ProjectLite {
   stage: string;
@@ -33,8 +42,13 @@ export interface MilestoneStanding extends MilestoneLite {
   tasks_done: number;
   /** Open tasks that are overdue, or scheduled to finish after the milestone's date. */
   tasks_late: number;
-  /** The milestone's date has passed and it isn't done. */
+  /** The milestone's date has passed and it hasn't been signed off. */
   overdue: boolean;
+  state: MilestoneState;
+  /** Why an open milestone is at risk, in words. Empty when it isn't. */
+  risks: string[];
+  /** How many days the forecast is later than the baseline (0 when on time, earlier, or either is unknown). */
+  slipped_days: number;
 }
 
 export interface Signal {
@@ -51,7 +65,9 @@ export interface Standing {
   progress_pct: number;
   milestones_total: number;
   milestones_done: number;
-  next_milestone: { name: string; due_date: string | null } | null;
+  milestones_at_risk: number;
+  milestones_missed: number;
+  next_milestone: { name: string; due_date: string | null; state: MilestoneState } | null;
   milestones: MilestoneStanding[];
   signals: Signal[];
   /** What the numbers suggest; null when the project isn't active. The team's own rating is kept separately. */
@@ -71,18 +87,43 @@ export function standing(project: ProjectLite, tasks: TaskLite[], milestones: Mi
   const doneWeight = tasks.filter((t) => t.status === "done").reduce((n, t) => n + weight(t), 0);
   const progress = totalWeight === 0 ? 0 : Math.round((doneWeight / totalWeight) * 100);
 
-  const ms: MilestoneStanding[] = milestones.map((m) => {
+  const outcomeOf = (m: MilestoneLite) => m.outcome ?? (m.completed_at !== null ? "achieved" : null);
+  const dayDiff = (from: string, to: string) => Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
+  const base: MilestoneStanding[] = milestones.map((m) => {
     const mine = tasks.filter((t) => t.milestone_id === m.id);
     const late = mine.filter((t) => t.status !== "done" && t.due_at !== null && (t.due_at < nowIso || (m.due_date !== null && t.due_at.slice(0, 10) > m.due_date)));
+    const outcome = outcomeOf(m);
     return {
       ...m,
       tasks_total: mine.length,
       tasks_done: mine.filter((t) => t.status === "done").length,
       tasks_late: late.length,
-      overdue: m.completed_at === null && m.due_date !== null && m.due_date < today,
+      overdue: outcome === null && m.due_date !== null && m.due_date < today,
+      state: outcome ?? "upcoming",
+      risks: [],
+      slipped_days: m.baseline_date && m.due_date ? Math.max(0, dayDiff(m.baseline_date, m.due_date)) : 0,
     };
   });
-  const openMs = ms.filter((m) => m.completed_at === null);
+  // Risk is worked out, not chosen: a date that has passed, a forecast later than the promise, work running late, or a
+  // milestone this one waits on that is late, missed or due after it.
+  const ms: MilestoneStanding[] = base.map((m) => {
+    if (outcomeOf(m) !== null) return m;
+    const risks: string[] = [];
+    if (m.overdue) risks.push(`Its date has passed (${plural(dayDiff(m.due_date!, today), "day")} ago) and it hasn't been signed off`);
+    if (m.slipped_days > 0) risks.push(`The forecast is ${plural(m.slipped_days, "day")} later than the baseline`);
+    if (m.tasks_late > 0) risks.push(`${plural(m.tasks_late, "task")} overdue or due after its date`);
+    for (const depId of m.depends_on ?? []) {
+      const dep = base.find((x) => x.id === depId);
+      if (!dep) continue;
+      if (dep.state === "missed") risks.push(`It depends on “${dep.name}”, which was missed`);
+      else if (dep.state !== "achieved") {
+        if (dep.overdue) risks.push(`It depends on “${dep.name}”, which is overdue`);
+        else if (dep.due_date && m.due_date && dep.due_date > m.due_date) risks.push(`It depends on “${dep.name}”, forecast after this date`);
+      }
+    }
+    return { ...m, risks, state: risks.length ? "at_risk" : "upcoming" };
+  });
+  const openMs = ms.filter((m) => outcomeOf(m) === null);
   const next = openMs.filter((m) => m.due_date !== null).sort((a, b) => a.due_date!.localeCompare(b.due_date!))[0];
 
   const signals: Signal[] = [];
@@ -98,9 +139,13 @@ export function standing(project: ProjectLite, tasks: TaskLite[], milestones: Mi
     if (lateMs.length) {
       signals.push({ code: "milestone_overdue", text: lateMs.length === 1 ? `Milestone “${lateMs[0].name}” is overdue` : `${lateMs.length} milestones are overdue` });
     }
-    const slipping = openMs.filter((m) => !m.overdue && m.tasks_late > 0);
+    const slipping = openMs.filter((m) => !m.overdue && m.risks.length > 0);
     if (slipping.length) {
-      signals.push({ code: "milestone_slipping", text: slipping.length === 1 ? `Work for “${slipping[0].name}” is running behind` : `Work for ${slipping.length} milestones is running behind` });
+      const one = slipping[0];
+      signals.push({
+        code: "milestone_slipping",
+        text: slipping.length > 1 ? `${slipping.length} milestones are at risk` : one.risks.length === 1 && one.tasks_late > 0 ? `Work for “${one.name}” is running behind` : `Milestone “${one.name}” is at risk`,
+      });
     }
     if (project.start_date && project.target_date && project.target_date > project.start_date && project.target_date >= today) {
       const span = Date.parse(project.target_date) - Date.parse(project.start_date);
@@ -121,8 +166,10 @@ export function standing(project: ProjectLite, tasks: TaskLite[], milestones: Mi
     tasks_overdue: overdue.length,
     progress_pct: progress,
     milestones_total: ms.length,
-    milestones_done: ms.length - openMs.length,
-    next_milestone: next ? { name: next.name, due_date: next.due_date } : null,
+    milestones_done: ms.filter((m) => m.state === "achieved").length,
+    milestones_at_risk: openMs.filter((m) => m.risks.length > 0).length,
+    milestones_missed: ms.filter((m) => m.state === "missed").length,
+    next_milestone: next ? { name: next.name, due_date: next.due_date, state: next.state } : null,
     milestones: ms,
     signals,
     suggested_health: suggested,

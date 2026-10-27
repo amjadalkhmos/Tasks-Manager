@@ -1,7 +1,7 @@
 import type { Express, Request, RequestHandler } from "express";
 import { z } from "zod";
-import { FORBIDDEN, projectAccess, visibleArgs, visibleTasksSql, type ProjectAccess } from "./access.js";
-import { inChunks, type DB, type Queryable } from "./db.js";
+import { FORBIDDEN, projectAccess, roleIn, visibleArgs, visibleTasksSql, type ProjectAccess } from "./access.js";
+import { inChunks, marks, type DB, type Queryable } from "./db.js";
 import { countWhere, displayName, epoch } from "./dialect.js";
 import { userName } from "./events.js";
 import { HttpError, parseId } from "./http-error.js";
@@ -9,6 +9,21 @@ import { forecast, type Stage as ForecastStage } from "./forecast.js";
 import { minutesBetween, parseStamp, sla } from "./sla.js";
 import { standing, type MilestoneLite, type TaskLite } from "./standing.js";
 import { effectiveStatuses } from "./statuses.js";
+
+/** What a milestone carries beyond what its standing needs. */
+interface MilestoneExtra {
+  description: string;
+  criteria: string;
+  owner_id: number | null;
+  owner_name: string | null;
+  signed_off_at: string | null;
+  sign_off_note: string;
+  marker: "payment" | "deliverable" | null;
+  amount: number | null;
+  invoiced_at: string | null;
+  /** How many times the forecast date has been moved. */
+  slips: number;
+}
 
 export const STAGES = ["planning", "active", "on_hold", "completed", "archived"] as const;
 export type Stage = (typeof STAGES)[number];
@@ -27,7 +42,6 @@ const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date like 2026-03-31"
 
 const stageBody = z.object({ stage: z.enum(STAGES), note: z.string().trim().max(2000).optional(), force: z.boolean().optional() });
 const updateBody = z.object({ health: z.enum(HEALTH), body: z.string().trim().max(5000).default("") });
-const milestoneBody = z.object({ name: z.string().trim().min(1).max(200), due_date: day.nullable(), done: z.boolean() });
 
 interface Deps {
   db: DB;
@@ -49,13 +63,22 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
   /** How each project stands (see standing.ts), plus the team's own latest health rating. Top-level tasks only. */
   async function standings(q: Queryable, projects: { id: number; stage: string; start_date: string | null; target_date: string | null }[]) {
     const ids = projects.map((p) => p.id);
-    const [tasks, milestones, latest] = await Promise.all([
+    const [tasks, milestones, deps, latest] = await Promise.all([
       inChunks(ids, (m, a) =>
         q.all<TaskLite & { project_id: number }>(`SELECT project_id, status, due_at, estimate_min, milestone_id FROM tasks WHERE parent_id IS NULL AND project_id IN (${m})`, ...a),
       ),
       inChunks(ids, (m, a) =>
-        q.all<MilestoneLite & { project_id: number; position: number }>(
-          `SELECT id, project_id, name, due_date, completed_at, position FROM milestones WHERE project_id IN (${m}) ORDER BY due_date IS NULL, due_date, position, id`, ...a,
+        q.all<MilestoneLite & MilestoneExtra & { project_id: number; position: number }>(
+          `SELECT ms.id, ms.project_id, ms.name, ms.due_date, ms.completed_at, ms.position, ms.description, ms.criteria, ms.owner_id, ${displayName(D, "o")} AS owner_name,
+                  ms.baseline_date, ms.outcome, ms.signed_off_at, ms.sign_off_note, ms.marker, ms.amount, ms.invoiced_at,
+                  (SELECT COUNT(*) FROM milestone_moves x WHERE x.milestone_id = ms.id AND x.from_date IS NOT NULL) AS slips
+           FROM milestones ms LEFT JOIN users o ON o.id = ms.owner_id
+           WHERE ms.project_id IN (${m}) ORDER BY ms.due_date IS NULL, ms.due_date, ms.position, ms.id`, ...a,
+        ),
+      ),
+      inChunks(ids, (m, a) =>
+        q.all<{ milestone_id: number; depends_on_id: number }>(
+          `SELECT d.milestone_id, d.depends_on_id FROM milestone_deps d JOIN milestones ms ON ms.id = d.milestone_id WHERE ms.project_id IN (${m})`, ...a,
         ),
       ),
       inChunks(ids, (m, a) =>
@@ -71,7 +94,9 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
       return m;
     };
     const t = byProject(tasks);
-    const ms = byProject(milestones);
+    const dependsOn = new Map<number, number[]>();
+    for (const d of deps) dependsOn.set(d.milestone_id, [...(dependsOn.get(d.milestone_id) ?? []), d.depends_on_id]);
+    const ms = byProject(milestones.map((m) => ({ ...m, depends_on: dependsOn.get(m.id) ?? [] })));
     const l = new Map(latest.map((r) => [r.project_id, r]));
     return (p: { id: number; stage: string; start_date: string | null; target_date: string | null }) => ({
       ...standing(p, t.get(p.id) ?? [], ms.get(p.id) ?? []),
@@ -210,36 +235,183 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
   });
 
   // ---------- milestones ----------
-  const milestoneRow = (id: number) => db.get("SELECT id, project_id, name, due_date, completed_at, position FROM milestones WHERE id = ?", id);
+  // A milestone is a dated checkpoint. Its date is a forecast that can move (each move is kept, with a reason, next to the
+  // baseline it started with); whether it was achieved is a decision for the project's lead or a manager.
+  const MS_COLS = `ms.id, ms.project_id, ms.name, ms.due_date, ms.completed_at, ms.position, ms.description, ms.criteria, ms.owner_id, ${displayName(D, "o")} AS owner_name,
+    ms.baseline_date, ms.outcome, ms.signed_off_at, ms.signed_off_by, ms.sign_off_note, ms.marker, ms.amount, ms.invoiced_at`;
+  const milestoneRow = async (id: number) => {
+    const row = await db.get<Record<string, any>>(`SELECT ${MS_COLS} FROM milestones ms LEFT JOIN users o ON o.id = ms.owner_id WHERE ms.id = ?`, id);
+    if (!row) return row;
+    const depends_on = (await db.all<{ depends_on_id: number }>("SELECT depends_on_id FROM milestone_deps WHERE milestone_id = ? ORDER BY depends_on_id", id)).map((d) => d.depends_on_id);
+    return { ...row, depends_on };
+  };
+
+  /** The project's lead, a manager, or (in a private project) its owner may decide a milestone's outcome and invoice it. */
+  const canSignOff = async (pa: ProjectAccess, userId: number): Promise<boolean> => {
+    if (pa.workspaceId === null) return pa.creatorId === userId;
+    if (pa.canManage) return true;
+    return (await db.get<{ lead_id: number | null }>("SELECT lead_id FROM projects WHERE id = ?", pa.id))?.lead_id === userId;
+  };
+
+  const marker = z.enum(["payment", "deliverable"]).nullable();
+  const amount = z.number().min(0).max(1e12).nullable();
+  const createBody = z.object({
+    name: z.string().trim().min(1).max(200),
+    due_date: day.nullable().optional(),
+    description: z.string().trim().max(5000).optional(),
+    criteria: z.string().trim().max(5000).optional(),
+    owner_id: z.number().int().positive().nullable().optional(),
+    marker: marker.optional(),
+    amount: amount.optional(),
+    depends_on: z.array(z.number().int().positive()).max(50).optional(),
+  });
+  const editBody = createBody.partial().extend({
+    /** Why the forecast date moved; kept in the milestone's history. */
+    reason: z.string().trim().max(500).optional(),
+    /** Only someone who can sign off may re-baseline. */
+    baseline_date: day.nullable().optional(),
+  });
+
+  /** The owner of a milestone must be someone on the project. */
+  const assertMilestoneOwner = async (pa: ProjectAccess, ownerId: number) => {
+    const ok = pa.workspaceId === null ? ownerId === pa.creatorId : !!(await roleIn(db, pa.workspaceId, ownerId));
+    if (!ok) throw new HttpError(400, "The owner has to be someone on this project");
+  };
+
+  /** Replaces a milestone's prerequisites, refusing anything outside the project, itself, or a loop. */
+  const setDependencies = async (t: Queryable, milestoneId: number, projectId: number, ids: number[]) => {
+    const unique = [...new Set(ids)];
+    if (unique.includes(milestoneId)) throw new HttpError(400, "A milestone can't depend on itself");
+    if (unique.length) {
+      const found = await t.all<{ id: number }>(`SELECT id FROM milestones WHERE project_id = ? AND id IN (${marks(unique.length)})`, projectId, ...unique);
+      if (found.length !== unique.length) throw new HttpError(400, "A milestone can only depend on others in the same project");
+    }
+    // Following the chain from each prerequisite must never lead back here.
+    const edges = await t.all<{ milestone_id: number; depends_on_id: number }>(
+      "SELECT d.milestone_id, d.depends_on_id FROM milestone_deps d JOIN milestones m ON m.id = d.milestone_id WHERE m.project_id = ? AND d.milestone_id <> ?", projectId, milestoneId,
+    );
+    const seen = new Set<number>();
+    const walk = (id: number): boolean => {
+      if (id === milestoneId) return true;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return edges.filter((e) => e.milestone_id === id).some((e) => walk(e.depends_on_id));
+    };
+    if (unique.some(walk)) throw new HttpError(400, "That would make the milestones wait on each other in a circle");
+    await t.run("DELETE FROM milestone_deps WHERE milestone_id = ?", milestoneId);
+    for (const id of unique) await t.run("INSERT INTO milestone_deps (milestone_id, depends_on_id) VALUES (?, ?)", milestoneId, id);
+  };
 
   app.post("/api/projects/:id/milestones", auth, async (req, res) => {
-    const b = milestoneBody.pick({ name: true, due_date: true }).partial({ due_date: true }).parse(req.body);
+    const b = createBody.parse(req.body);
     const pa = await readable(uid(req), req.params.id);
     if (!pa.canWrite) throw FORBIDDEN();
-    const id = await db.insert(
-      "INSERT INTO milestones (project_id, name, due_date, position) VALUES (?, ?, ?, (SELECT COALESCE(MAX(position), 0) + 1 FROM milestones WHERE project_id = ?))",
-      pa.id, b.name, b.due_date ?? null, pa.id,
-    );
+    if (b.owner_id) await assertMilestoneOwner(pa, b.owner_id);
+    const id = await db.tx(async (t) => {
+      const created = await t.insert(
+        `INSERT INTO milestones (project_id, name, due_date, baseline_date, description, criteria, owner_id, marker, amount, position)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(position), 0) + 1 FROM milestones WHERE project_id = ?))`,
+        pa.id, b.name, b.due_date ?? null, b.due_date ?? null, b.description ?? "", b.criteria ?? "", b.owner_id ?? null, b.marker ?? null, b.marker === "payment" ? (b.amount ?? null) : null, pa.id,
+      );
+      if (b.depends_on?.length) await setDependencies(t, created, pa.id, b.depends_on);
+      return created;
+    });
     res.status(201).json(await milestoneRow(id));
   });
 
-  const loadMilestone = async (userId: number, rawId: unknown) => {
-    const m = await db.get<{ id: number; project_id: number }>("SELECT id, project_id FROM milestones WHERE id = ?", parseId(rawId, "Milestone not found"));
+  const loadMilestone = async (userId: number, rawId: unknown, need: "read" | "write" | "sign" = "write") => {
+    const m = await db.get<{ id: number; project_id: number; due_date: string | null; baseline_date: string | null; outcome: string | null; marker: string | null; name: string }>(
+      "SELECT id, project_id, due_date, baseline_date, outcome, marker, name FROM milestones WHERE id = ?", parseId(rawId, "Milestone not found"),
+    );
     if (!m) throw new HttpError(404, "Milestone not found");
     const pa = await projectAccess(db, userId, m.project_id);
     if (!pa) throw new HttpError(404, "Milestone not found");
-    if (!pa.canWrite) throw FORBIDDEN();
-    return m;
+    if (need !== "read" && !pa.canWrite) throw FORBIDDEN();
+    const signer = need === "sign" || need === "read" ? await canSignOff(pa, userId) : false;
+    if (need === "sign" && !signer) throw new HttpError(403, "Only the project's lead or a manager can decide a milestone's outcome");
+    return { ...m, pa, signer };
   };
 
+  app.get("/api/milestones/:id", auth, async (req, res) => {
+    const m = await loadMilestone(uid(req), req.params.id, "read");
+    const [row, moves, tasks, dependents, siblings] = await Promise.all([
+      milestoneRow(m.id),
+      db.all(
+        `SELECT x.id, x.from_date, x.to_date, x.reason, x.created_at, ${displayName(D, "u")} AS user_name FROM milestone_moves x LEFT JOIN users u ON u.id = x.user_id WHERE x.milestone_id = ? ORDER BY x.id DESC`, m.id,
+      ),
+      db.all(`SELECT t.id, t.title, t.status, t.due_at FROM tasks t WHERE t.milestone_id = ? AND t.parent_id IS NULL ORDER BY CASE WHEN t.status = 'done' THEN 1 ELSE 0 END, t.due_at IS NULL, t.due_at, t.id LIMIT 200`, m.id),
+      db.all("SELECT d.milestone_id AS id, ms.name FROM milestone_deps d JOIN milestones ms ON ms.id = d.milestone_id WHERE d.depends_on_id = ? ORDER BY ms.id", m.id),
+      db.all("SELECT id, name, outcome FROM milestones WHERE project_id = ? AND id <> ? ORDER BY due_date IS NULL, due_date, position, id", m.project_id, m.id),
+    ]);
+    res.json({ ...row, moves, tasks, dependents, others: siblings, can_write: m.pa.canWrite, can_sign_off: m.signer });
+  });
+
   app.patch("/api/milestones/:id", auth, async (req, res) => {
-    const b = milestoneBody.partial().parse(req.body);
-    const m = await loadMilestone(uid(req), req.params.id);
+    const me = uid(req);
+    const b = editBody.parse(req.body);
+    const m = await loadMilestone(me, req.params.id, b.baseline_date !== undefined ? "sign" : "write");
+    if (m.outcome !== null && (b.due_date !== undefined || b.depends_on !== undefined)) throw new HttpError(409, "This milestone has been decided. Reopen it to change its date or what it waits on.");
+    if (b.owner_id) await assertMilestoneOwner(m.pa, b.owner_id);
     await db.tx(async (t) => {
-      if (b.name !== undefined) await t.run("UPDATE milestones SET name = ? WHERE id = ?", b.name, m.id);
-      if (b.due_date !== undefined) await t.run("UPDATE milestones SET due_date = ? WHERE id = ?", b.due_date, m.id);
-      if (b.done !== undefined) await t.run("UPDATE milestones SET completed_at = ? WHERE id = ?", b.done ? new Date().toISOString() : null, m.id);
+      const sets: string[] = [];
+      const args: unknown[] = [];
+      const put = (col: string, v: unknown) => (sets.push(`${col} = ?`), args.push(v));
+      if (b.name !== undefined) put("name", b.name);
+      if (b.description !== undefined) put("description", b.description);
+      if (b.criteria !== undefined) put("criteria", b.criteria);
+      if (b.owner_id !== undefined) put("owner_id", b.owner_id);
+      if (b.marker !== undefined) {
+        put("marker", b.marker);
+        if (b.marker !== "payment") put("amount", null);
+      }
+      if (b.amount !== undefined && (b.marker === "payment" || (b.marker === undefined && m.marker === "payment"))) put("amount", b.amount);
+      if (b.baseline_date !== undefined) put("baseline_date", b.baseline_date);
+      if (b.due_date !== undefined && b.due_date !== m.due_date) {
+        put("due_date", b.due_date);
+        // The first date ever given is the promise.
+        if (m.baseline_date === null && b.baseline_date === undefined) put("baseline_date", b.due_date);
+        await t.run("INSERT INTO milestone_moves (milestone_id, user_id, from_date, to_date, reason) VALUES (?, ?, ?, ?, ?)", m.id, me, m.due_date, b.due_date, b.reason ?? "");
+      }
+      if (sets.length) await t.run(`UPDATE milestones SET ${sets.join(", ")} WHERE id = ?`, ...args, m.id);
+      if (b.depends_on !== undefined) await setDependencies(t, m.id, m.project_id, b.depends_on);
     });
+    res.json(await milestoneRow(m.id));
+  });
+
+  /** Deciding a milestone: achieved or missed, by the project's lead or a manager, with a note. */
+  app.post("/api/milestones/:id/sign-off", auth, async (req, res) => {
+    const me = uid(req);
+    const b = z.object({ outcome: z.enum(["achieved", "missed"]), note: z.string().trim().max(2000).optional(), force: z.boolean().optional() }).parse(req.body);
+    const m = await loadMilestone(me, req.params.id, "sign");
+    if (m.outcome !== null) throw new HttpError(409, "This milestone has already been decided. Reopen it first.");
+    if (b.outcome === "achieved" && !b.force) {
+      const waiting = await db.all<{ name: string }>(
+        "SELECT ms.name FROM milestone_deps d JOIN milestones ms ON ms.id = d.depends_on_id WHERE d.milestone_id = ? AND (ms.outcome IS NULL OR ms.outcome <> 'achieved') ORDER BY ms.id", m.id,
+      );
+      if (waiting.length) throw new HttpError(409, `It waits on ${waiting.map((w) => `“${w.name}”`).join(", ")}, which ${waiting.length === 1 ? "hasn't" : "haven't"} been achieved.`);
+    }
+    const now = new Date().toISOString();
+    await db.run(
+      "UPDATE milestones SET outcome = ?, completed_at = ?, signed_off_at = ?, signed_off_by = ?, sign_off_note = ? WHERE id = ?",
+      b.outcome, b.outcome === "achieved" ? now : null, now, me, b.note ?? "", m.id,
+    );
+    res.json(await milestoneRow(m.id));
+  });
+
+  app.post("/api/milestones/:id/reopen", auth, async (req, res) => {
+    const m = await loadMilestone(uid(req), req.params.id, "sign");
+    if (m.outcome === null) throw new HttpError(409, "This milestone is still open");
+    await db.run("UPDATE milestones SET outcome = NULL, completed_at = NULL, signed_off_at = NULL, signed_off_by = NULL, sign_off_note = '', invoiced_at = NULL WHERE id = ?", m.id);
+    res.json(await milestoneRow(m.id));
+  });
+
+  /** For a payment milestone that was achieved: record that the invoice has gone out (or take it back). */
+  app.post("/api/milestones/:id/invoiced", auth, async (req, res) => {
+    const { invoiced } = z.object({ invoiced: z.boolean() }).parse(req.body);
+    const m = await loadMilestone(uid(req), req.params.id, "sign");
+    if (m.marker !== "payment") throw new HttpError(409, "Only a payment milestone is invoiced");
+    if (m.outcome !== "achieved") throw new HttpError(409, "A payment milestone is invoiced once it has been achieved");
+    await db.run("UPDATE milestones SET invoiced_at = ? WHERE id = ?", invoiced ? new Date().toISOString() : null, m.id);
     res.json(await milestoneRow(m.id));
   });
 
@@ -334,7 +506,7 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
 
     res.json({
       project: { ...project, lead_name: project.lead_id ? (names.get(project.lead_id) ?? null) : null },
-      access: { can_write: pa.canWrite, can_manage: canEditProject(pa, me) },
+      access: { can_write: pa.canWrite, can_manage: canEditProject(pa, me), can_sign_off: await canSignOff(pa, me) },
       transitions: TRANSITIONS[pa.stage as Stage],
       progress: { ...stats, tasks_blocked: blocked!.n },
       by_status: byStatus,

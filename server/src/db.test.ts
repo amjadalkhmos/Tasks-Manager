@@ -226,7 +226,7 @@ describe("upgrading an existing database", () => {
     for (const c of ["deal_id", "lead_id", "account_id"]) await db.exec(`ALTER TABLE tasks DROP COLUMN ${c}`);
     await db.exec(`ALTER TABLE tasks DROP COLUMN milestone_id`);
     await db.exec(`ALTER TABLE tasks DROP COLUMN start_at`);
-    await db.exec(`DROP TABLE milestones; DROP TABLE project_updates`);
+    await db.exec(`DROP TABLE milestone_deps; DROP TABLE milestone_moves; DROP TABLE milestones; DROP TABLE project_updates`);
     await db.exec(`ALTER TABLE projects DROP COLUMN type`);
     if (db.dialect === "postgres") {
       await db.exec(`ALTER TABLE tasks DROP COLUMN status_id; DROP TABLE statuses`);

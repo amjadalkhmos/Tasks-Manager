@@ -164,6 +164,10 @@ export interface Project {
   resolution_hours: number | null;
 }
 
+export type MilestoneState = "upcoming" | "at_risk" | "achieved" | "missed";
+export type MilestoneMarker = "payment" | "deliverable";
+
+/** A dated checkpoint. `due_date` is the forecast (the current best guess); `baseline_date` is what was first promised. */
 export interface Milestone {
   id: number;
   project_id: number;
@@ -171,6 +175,42 @@ export interface Milestone {
   due_date: string | null;
   completed_at: string | null;
   position: number;
+  description: string;
+  criteria: string;
+  owner_id: number | null;
+  owner_name: string | null;
+  baseline_date: string | null;
+  /** The decision made by the project's lead or a manager; null while open. */
+  outcome: "achieved" | "missed" | null;
+  signed_off_at: string | null;
+  sign_off_note: string;
+  marker: MilestoneMarker | null;
+  amount: number | null;
+  invoiced_at: string | null;
+  depends_on: number[];
+}
+
+export interface MilestoneInput {
+  name?: string;
+  due_date?: string | null;
+  description?: string;
+  criteria?: string;
+  owner_id?: number | null;
+  marker?: MilestoneMarker | null;
+  amount?: number | null;
+  depends_on?: number[];
+  /** Why the forecast moved. */
+  reason?: string;
+  baseline_date?: string | null;
+}
+
+export interface MilestoneDetail extends Milestone {
+  moves: { id: number; from_date: string | null; to_date: string | null; reason: string; created_at: string; user_name: string | null }[];
+  tasks: { id: number; title: string; status: string; due_at: string | null }[];
+  dependents: { id: number; name: string }[];
+  others: { id: number; name: string; outcome: "achieved" | "missed" | null }[];
+  can_write: boolean;
+  can_sign_off: boolean;
 }
 
 export interface Signal {
@@ -187,7 +227,9 @@ export interface PortfolioRow extends Project {
   progress_pct: number;
   milestones_total: number;
   milestones_done: number;
-  next_milestone: { name: string; due_date: string | null } | null;
+  milestones_at_risk: number;
+  milestones_missed: number;
+  next_milestone: { name: string; due_date: string | null; state: MilestoneState } | null;
   /** The team's own latest rating. */
   health: Health | null;
   /** What the numbers suggest (active projects only). */
@@ -201,6 +243,13 @@ export interface MilestoneProgress extends Milestone {
   tasks_done: number;
   tasks_late: number;
   overdue: boolean;
+  /** Worked out from the dates, the work and what it waits on; the decision overrides it once made. */
+  state: MilestoneState;
+  /** Why an open milestone is at risk, in words. */
+  risks: string[];
+  slipped_days: number;
+  /** How many times the forecast has moved. */
+  slips: number;
 }
 
 export interface AttentionTask {
@@ -254,7 +303,7 @@ export interface ProjectUpdate {
 
 export interface ProjectOverview {
   project: Project & { lead_name: string | null };
-  access: { can_write: boolean; can_manage: boolean };
+  access: { can_write: boolean; can_manage: boolean; can_sign_off: boolean };
   transitions: Stage[];
   progress: Omit<PortfolioRow, keyof Project> & { tasks_blocked: number };
   by_status: { id: number | null; name: string; color: string; category: Category; count: number }[];
@@ -491,8 +540,12 @@ export const api = {
   overview: (id: number) => request<ProjectOverview>("GET", `/projects/${id}/overview`),
   postUpdate: (id: number, health: Health, body: string) => request<ProjectUpdate>("POST", `/projects/${id}/updates`, { health, body }),
   deleteUpdate: (id: number, updateId: number) => request<void>("DELETE", `/projects/${id}/updates/${updateId}`),
-  addMilestone: (id: number, name: string, due_date: string | null) => request<Milestone>("POST", `/projects/${id}/milestones`, { name, due_date }),
-  updateMilestone: (id: number, m: { name?: string; due_date?: string | null; done?: boolean }) => request<Milestone>("PATCH", `/milestones/${id}`, m),
+  addMilestone: (id: number, m: MilestoneInput & { name: string }) => request<Milestone>("POST", `/projects/${id}/milestones`, m),
+  milestone: (id: number) => request<MilestoneDetail>("GET", `/milestones/${id}`),
+  updateMilestone: (id: number, m: MilestoneInput) => request<Milestone>("PATCH", `/milestones/${id}`, m),
+  signOffMilestone: (id: number, b: { outcome: "achieved" | "missed"; note?: string; force?: boolean }) => request<Milestone>("POST", `/milestones/${id}/sign-off`, b),
+  reopenMilestone: (id: number) => request<Milestone>("POST", `/milestones/${id}/reopen`),
+  setMilestoneInvoiced: (id: number, invoiced: boolean) => request<Milestone>("POST", `/milestones/${id}/invoiced`, { invoiced }),
   deleteMilestone: (id: number) => request<void>("DELETE", `/milestones/${id}`),
 
   statuses: () => request<Status[]>("GET", "/statuses"),

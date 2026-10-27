@@ -6,6 +6,7 @@ import { api, type Health, type Project, type ProjectOverview, type ProjectType,
 import { Board } from "../components/Board";
 import { ForecastPanel } from "../components/ForecastPanel";
 import { IntakeSettings } from "../components/IntakeSettings";
+import { MilestonePanel } from "../components/MilestonePanel";
 import { SupportPanel } from "../components/SupportPanel";
 import { TicketQueue } from "../components/TicketQueue";
 import { HealthBadge, ProgressBar, StageBadge } from "../components/ProjectBadges";
@@ -158,17 +159,12 @@ function Overview({ id, o, refresh, onOpen }: { id: number; o: ProjectOverview; 
   const open = g.tasks_total - g.tasks_done;
   const canWrite = o.access.can_write;
   const tasksQ = useQuery({ queryKey: ["tasks"], queryFn: () => api.tasks() });
-  const [msName, setMsName] = useState("");
-  const [msDue, setMsDue] = useState("");
   const [health, setHealth] = useState<Health>("on_track");
   const [body, setBody] = useState("");
 
-  const addMs = useMutation({ mutationFn: () => api.addMilestone(id, msName.trim(), msDue || null), onSuccess: () => (setMsName(""), setMsDue(""), refresh()) });
-  const toggleMs = useMutation({ mutationFn: ({ mid, done }: { mid: number; done: boolean }) => api.updateMilestone(mid, { done }), onSuccess: refresh });
-  const delMs = useMutation({ mutationFn: api.deleteMilestone, onSuccess: refresh });
   const post = useMutation({ mutationFn: () => api.postUpdate(id, health, body.trim()), onSuccess: () => (setBody(""), refresh()) });
   const delUpdate = useMutation({ mutationFn: (uid: number) => api.deleteUpdate(id, uid), onSuccess: refresh });
-  const error = (addMs.error ?? toggleMs.error ?? delMs.error ?? post.error ?? delUpdate.error)?.message;
+  const error = (post.error ?? delUpdate.error)?.message;
   const today = new Date().toISOString().slice(0, 10);
   const maxWork = Math.max(1, ...o.workload.map((w) => w.open));
 
@@ -239,39 +235,16 @@ function Overview({ id, o, refresh, onOpen }: { id: number; o: ProjectOverview; 
       {error && <p className="alert" role="alert">{error}</p>}
 
       <div className="pm-grid">
-        <section className="panel span-2" aria-label="Milestones">
-          <h2>Milestones {g.milestones_total > 0 && <span className="muted small">{g.milestones_done}/{g.milestones_total} done</span>}</h2>
-          {o.milestones.length === 0 && <p className="muted small">No milestones yet. Add the dates that matter, then put tasks in them from the task panel.</p>}
-          <ul className="milestones">
-            {o.milestones.map((m) => (
-              <li key={m.id} className={m.completed_at ? "done" : ""}>
-                <input type="checkbox" checked={!!m.completed_at} disabled={!canWrite} aria-label={`Done: ${m.name}`} onChange={() => toggleMs.mutate({ mid: m.id, done: !m.completed_at })} />
-                <span className="name">
-                  {m.name}
-                  {m.tasks_total > 0 && (
-                    <span className="ms-progress">
-                      <ProgressBar done={m.tasks_done} total={m.tasks_total} label={`${m.name} progress`} />
-                      <span className="muted small">{m.tasks_done}/{m.tasks_total} tasks</span>
-                    </span>
-                  )}
-                </span>
-                {!m.completed_at && m.overdue && <span className="pbadge health-off_track">Overdue</span>}
-                {!m.completed_at && !m.overdue && m.tasks_late > 0 && <span className="pbadge health-at_risk" title="Open tasks are overdue or due after this date">Slipping</span>}
-                {m.due_date && <span className={`muted small${!m.completed_at && m.due_date < today ? " late" : ""}`}>{formatDay(m.due_date)}</span>}
-                {canWrite && (
-                  <button type="button" className="icon sm" aria-label={`Remove ${m.name}`} onClick={() => delMs.mutate(m.id)}><X size={14} /></button>
-                )}
-              </li>
-            ))}
-          </ul>
-          {canWrite && (
-            <form className="add-line" onSubmit={(e) => (e.preventDefault(), msName.trim() && addMs.mutate())}>
-              <input aria-label="New milestone" placeholder="Add a milestone…" value={msName} maxLength={200} onChange={(e) => setMsName(e.target.value)} />
-              <input type="date" aria-label="Milestone date" value={msDue} onChange={(e) => setMsDue(e.target.value)} />
-              <button type="submit" className="secondary" disabled={!msName.trim() || addMs.isPending}>Add</button>
-            </form>
-          )}
-        </section>
+        <MilestonePanel
+          projectId={id}
+          workspaceId={o.project.workspace_id}
+          milestones={o.milestones}
+          canWrite={canWrite}
+          canSignOff={o.access.can_sign_off}
+          currency={o.project.currency}
+          refresh={refresh}
+          onOpenTask={onOpen}
+        />
 
         <section className="panel" aria-label="Tasks by status">
           <h2>By status</h2>

@@ -91,6 +91,9 @@ CREATE TABLE IF NOT EXISTS project_updates (
   body TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT ${NOW_ISO}
 );
+-- A milestone is a dated checkpoint, not a group of tasks. due_date is the forecast (the current best guess);
+-- baseline_date is what was first promised, so slippage can be seen. outcome is a decision made by the project's lead or
+-- a manager (achieved or missed), never worked out from the tasks. See ADDED_COLUMNS for the rest.
 CREATE TABLE IF NOT EXISTS milestones (
   id ${ID},
   project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -98,6 +101,23 @@ CREATE TABLE IF NOT EXISTS milestones (
   due_date TEXT,
   completed_at TEXT,
   position INTEGER NOT NULL DEFAULT 0
+);
+-- Each change of a milestone's forecast date, with the reason given.
+CREATE TABLE IF NOT EXISTS milestone_moves (
+  id ${ID},
+  milestone_id INTEGER NOT NULL REFERENCES milestones(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  from_date TEXT,
+  to_date TEXT,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT ${NOW_ISO}
+);
+-- "milestone_id can't be achieved before depends_on_id": both belong to the same project.
+CREATE TABLE IF NOT EXISTS milestone_deps (
+  milestone_id INTEGER NOT NULL REFERENCES milestones(id) ON DELETE CASCADE,
+  depends_on_id INTEGER NOT NULL REFERENCES milestones(id) ON DELETE CASCADE,
+  PRIMARY KEY (milestone_id, depends_on_id),
+  CHECK (milestone_id != depends_on_id)
 );
 CREATE TABLE IF NOT EXISTS tags (
   id ${ID},
@@ -394,6 +414,8 @@ CREATE INDEX IF NOT EXISTS idx_statuses_ws ON statuses(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_statuses_project ON statuses(project_id);
 CREATE INDEX IF NOT EXISTS idx_project_updates ON project_updates(project_id, id);
 CREATE INDEX IF NOT EXISTS idx_milestones_project ON milestones(project_id);
+CREATE INDEX IF NOT EXISTS idx_milestone_moves ON milestone_moves(milestone_id, id);
+CREATE INDEX IF NOT EXISTS idx_milestone_deps_on ON milestone_deps(depends_on_id);
 CREATE INDEX IF NOT EXISTS idx_members_user ON workspace_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task ON comments(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_time_user ON time_entries(user_id, started_at);
@@ -449,6 +471,19 @@ export const ADDED_COLUMNS: Record<string, [string, string][]> = {
     ["lead_id", "INTEGER REFERENCES leads(id) ON DELETE SET NULL"],
     ["account_id", "INTEGER REFERENCES accounts(id) ON DELETE SET NULL"],
   ],
+  milestones: [
+    ["description", "TEXT NOT NULL DEFAULT ''"],
+    ["criteria", "TEXT NOT NULL DEFAULT ''"],
+    ["owner_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"],
+    ["baseline_date", "TEXT"],
+    ["outcome", "TEXT CHECK (outcome IN ('achieved','missed'))"],
+    ["signed_off_at", "TEXT"],
+    ["signed_off_by", "INTEGER REFERENCES users(id) ON DELETE SET NULL"],
+    ["sign_off_note", "TEXT NOT NULL DEFAULT ''"],
+    ["marker", "TEXT CHECK (marker IN ('payment','deliverable'))"],
+    ["amount", "REAL"],
+    ["invoiced_at", "TEXT"],
+  ],
   statuses: [["probability", "INTEGER CHECK (probability BETWEEN 0 AND 100)"]],
   comments: [["requester", "TEXT"]],
   users: [["name", "TEXT"]],
@@ -478,4 +513,7 @@ export async function createSchema(db: Queryable): Promise<void> {
     }
   }
   await db.exec(INDEXES);
+  // Milestones made before they had a baseline or an outcome: what they said then becomes the promise and the decision.
+  await db.exec(`UPDATE milestones SET baseline_date = due_date WHERE baseline_date IS NULL AND due_date IS NOT NULL`);
+  await db.exec(`UPDATE milestones SET outcome = 'achieved', signed_off_at = completed_at WHERE outcome IS NULL AND completed_at IS NOT NULL`);
 }

@@ -787,9 +787,12 @@ fieldset.bare { border: 0; margin: 0; padding: 0; min-width: 0; }
 .g-bar.late { outline: 2px solid var(--danger); outline-offset: 0; }
 .g-milestone { position: absolute; top: 9px; z-index: 2; transform: translateX(-50%); color: var(--accent); }
 .g-milestone svg { fill: currentColor; }
-.g-milestone.done { color: var(--ink-3); }
-.g-milestone.late { color: var(--danger); }
-.g-milestone.slipping { color: var(--warn); }
+.g-milestone.achieved { color: var(--ink-3); }
+.g-milestone.missed { color: var(--danger); }
+.g-milestone.missed svg { fill: none; stroke-width: 2.5; }
+.g-milestone.at_risk { color: var(--warn); }
+.g-milestone.baseline { color: var(--ink-3); opacity: 0.5; z-index: 1; }
+.g-milestone.baseline svg { fill: none; }
 .unscheduled { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 18px; }
 @media (max-width: 760px) { .g-row { grid-template-columns: 130px max-content; } }
 .panel.attention.warn { border-color: color-mix(in oklch, var(--warn) 45%, var(--border)); background: color-mix(in oklch, var(--warn-soft) 40%, var(--surface)); }
@@ -974,3 +977,23 @@ fieldset.choice legend { padding: 0 6px; font-weight: 600; font-size: 0.8125rem;
   .filters input[type="search"] { width: 100%; flex: 1 1 100%; }
   .record-value { justify-items: start; text-align: left; }
 }
+
+/* Milestones */
+.ms-list { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 6px; }
+.ms-row { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); }
+.ms-row.ms-at_risk { border-left: 3px solid var(--warn); }
+.ms-row.ms-missed { border-left: 3px solid var(--danger); }
+.ms-row.ms-achieved { border-left: 3px solid var(--accent); }
+.ms-open { display: grid; gap: 4px; width: 100%; justify-content: stretch; text-align: left; min-height: 0; padding: 10px 12px; background: none; color: var(--ink); border: 0; font-weight: 400; white-space: normal; }
+.ms-open:hover:not(:disabled) { background: var(--bg-hover); }
+.ms-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.ms-row.ms-achieved .ms-title strong, .ms-row.ms-missed .ms-title strong { color: var(--ink-2); }
+.ms-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; font-size: 0.875rem; color: var(--ink-2); }
+.ms-dates .late { color: var(--danger); font-weight: 600; }
+.ms-risk { font-size: 0.8125rem; color: var(--warn); }
+.ms-open .ms-progress { display: flex; align-items: center; gap: 8px; max-width: 320px; }
+.marker-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; background: var(--info-soft); color: var(--info); white-space: nowrap; }
+.ms-dialog { display: grid; gap: 4px; }
+.ms-dialog .ok { color: var(--accent); }
+.ms-risks { align-items: flex-start; }
+.ms-risks ul { margin: 4px 0 0; padding-left: 18px; font-weight: 400; }

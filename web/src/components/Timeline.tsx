@@ -35,7 +35,10 @@ export function Timeline({ project, tasks, milestones, onOpen }: { project: Proj
   const stamps: Date[] = [today];
   if (project.start_date) stamps.push(parseDay(project.start_date));
   if (project.target_date) stamps.push(parseDay(project.target_date));
-  for (const m of milestones) if (m.due_date) stamps.push(parseDay(m.due_date));
+  for (const m of milestones) {
+    if (m.due_date) stamps.push(parseDay(m.due_date));
+    if (m.baseline_date) stamps.push(parseDay(m.baseline_date));
+  }
   for (const t of top) {
     const s = t.start_at ? new Date(t.start_at) : null;
     const d = t.due_at ? new Date(t.due_at) : null;
@@ -118,11 +121,21 @@ export function Timeline({ project, tasks, milestones, onOpen }: { project: Proj
               <div className="g-track" style={track}>
                 {weeks.map((w) => <span key={w} className="g-week" style={{ left: w }} />)}
                 <span className="g-today" style={{ left: todayLeft }} />
+                {g.milestone?.baseline_date && g.milestone.due_date && g.milestone.baseline_date !== g.milestone.due_date && (
+                  <span
+                    className="g-milestone baseline"
+                    style={{ left: dayIndex(parseDay(g.milestone.baseline_date), origin) * px + px / 2 }}
+                    title={`${g.milestone.name} · baseline ${g.milestone.baseline_date}`}
+                    aria-hidden="true"
+                  >
+                    <Diamond size={16} />
+                  </span>
+                )}
                 {g.milestone?.due_date && (
                   <span
-                    className={`g-milestone${g.milestone.completed_at ? " done" : g.milestone.overdue ? " late" : g.milestone.tasks_late ? " slipping" : ""}`}
+                    className={`g-milestone ${g.milestone.state}`}
                     style={{ left: dayIndex(parseDay(g.milestone.due_date), origin) * px + px / 2 }}
-                    title={`${g.milestone.name} · ${g.milestone.due_date}`}
+                    title={`${g.milestone.name} · ${g.milestone.due_date}${g.milestone.state === "at_risk" ? ` · at risk: ${g.milestone.risks[0] ?? ""}` : g.milestone.state === "upcoming" ? "" : ` · ${g.milestone.state}`}`}
                   >
                     <Diamond size={16} />
                   </span>
