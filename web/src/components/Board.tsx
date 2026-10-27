@@ -5,6 +5,9 @@ import { api, type Project, type Task } from "../api";
 import { BUILTIN, statusOf, statusesFor, useStatuses, type StatusOption } from "../lib/statuses";
 import { PRIORITY, dueState, formatDue, positionBetween } from "../lib/tasks";
 import { useTaskActions } from "../lib/useTaskActions";
+import { formatMoney } from "../lib/money";
+import { urgentClock } from "../lib/sla";
+import { SlaBadge } from "./SlaBadge";
 import { StatusChip } from "./StatusChip";
 
 const DONE_LIMIT = 20;
@@ -75,6 +78,11 @@ export function Board({ project: picked, onOpen }: { project?: Project; onOpen: 
                 <span className="dot" style={{ background: c.color }} />
                 {c.name}
                 <span className="count">{items.length}</span>
+                {picked?.type === "pipeline" && c.category !== "done" && (
+                  <span className="deal-value column-total" title="Total value in this stage">
+                    {formatMoney(all.filter((t) => inColumn(t, c)).reduce((n, t) => n + (t.value ?? 0), 0), picked.currency)}
+                  </span>
+                )}
               </h2>
               {items.map((t) => {
                 const due = dueState(t);
@@ -94,8 +102,13 @@ export function Board({ project: picked, onOpen }: { project?: Project; onOpen: 
                       setDragId(null);
                     }}
                   >
-                    <button className="title" onClick={() => onOpen(t.id)}>{t.title}</button>
+                    <button className="title" onClick={() => onOpen(t.id)}>{t.ticket_no !== null && <span className="ticket-no">#{t.ticket_no}</span>}{t.title}</button>
                     <div className="meta">
+                      {t.value !== null && <span className="deal-value">{formatMoney(t.value, picked?.currency)}</span>}
+                      {(() => {
+                        const clock = urgentClock(t);
+                        return clock ? <SlaBadge clock={clock} /> : null;
+                      })()}
                       {!picked && <StatusChip status={statuses.of(t)} />}
                       {t.blocked && <span title="Blocked"><Lock size={13} /></span>}
                       {t.priority > 0 && <span className={`pill p${t.priority}`}>{PRIORITY[t.priority]}</span>}

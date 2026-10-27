@@ -12,6 +12,7 @@ import { registerAi, type AiClient } from "./ai.js";
 import { registerGoogle, type GoogleApi } from "./google.js";
 import { registerTasks } from "./tasks.js";
 import { registerCollab } from "./collab.js";
+import { registerIntake } from "./intake.js";
 import { registerMeetings } from "./meetings.js";
 import { registerProjectManagement } from "./pm.js";
 import { registerStatuses } from "./statuses.js";
@@ -30,6 +31,8 @@ export interface AppOptions {
 
 export function createApp(db: DB, secret: string, options: AppOptions = {}) {
   const app = express();
+  // Behind a reverse proxy (Railway, nginx…) set TRUST_PROXY=1 so rate limits see each visitor's address, not the proxy's.
+  if (process.env.TRUST_PROXY) app.set("trust proxy", /^\d+$/.test(process.env.TRUST_PROXY) ? Number(process.env.TRUST_PROXY) : process.env.TRUST_PROXY);
   app.use(express.json({ limit: "5mb" }));
   app.use(cookieParser());
   const auth = requireAuth(secret);
@@ -97,6 +100,7 @@ export function createApp(db: DB, secret: string, options: AppOptions = {}) {
   registerAi(app, { db, auth, uid, ai: options.ai ?? null });
   registerGoogle(app, { db, auth, uid, api: options.google ?? null, secret, key: makeKey(options.tokenEncKey, secret) });
   registerCollab(app, { db, auth, uid });
+  registerIntake(app, { db, auth, uid });
   registerMeetings(app, { db, auth, uid });
   registerStatuses(app, { db, auth, uid });
   registerProjectManagement(app, { db, auth, uid });

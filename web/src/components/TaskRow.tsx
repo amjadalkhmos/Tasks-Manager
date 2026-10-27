@@ -4,6 +4,10 @@ import { usePeople } from "../lib/people";
 import { useStatuses } from "../lib/statuses";
 import { PRIORITY, describeRecurrence, dueState, formatDue, formatMinutes } from "../lib/tasks";
 import { Avatar } from "./Avatar";
+import { useCurrencyOf } from "../lib/currency";
+import { formatMoney } from "../lib/money";
+import { urgentClock } from "../lib/sla";
+import { SlaBadge } from "./SlaBadge";
 import { StatusChip } from "./StatusChip";
 
 interface Props {
@@ -22,6 +26,8 @@ export function TaskRow({ task: t, onOpen, onToggle, nested, project }: Props) {
   const due = dueState(t);
   const { nameOf } = usePeople();
   const status = useStatuses().of(t);
+  const clock = urgentClock(t);
+  const currencyOf = useCurrencyOf();
   return (
     <li className={t.status === "done" ? "done" : ""} data-priority={t.priority}>
       <input
@@ -33,12 +39,15 @@ export function TaskRow({ task: t, onOpen, onToggle, nested, project }: Props) {
         onChange={() => onToggle(t)}
       />
       <button className="title" onClick={() => onOpen(t.id)}>
+        {t.ticket_no !== null && <span className="ticket-no">#{t.ticket_no}</span>}
         {nested && <CornerDownRight size={ICON} className="indent" aria-label="Subtask" />}
         {t.title}
         {project && <span className="proj-label">{project}</span>}
       </button>
       <span className="meta">
         <StatusChip status={status} />
+        {clock && <SlaBadge clock={clock} />}
+        {t.value !== null && <span className="deal-value" title="Deal value">{formatMoney(t.value, currencyOf(t.project_id))}</span>}
         {t.blocked && t.status !== "done" && (
           <span title="Blocked by unfinished tasks"><Lock size={ICON} data-icon="lock" /></span>
         )}

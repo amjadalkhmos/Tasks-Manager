@@ -232,8 +232,8 @@ export function registerCollab(app: Express, { db, auth, uid }: Deps) {
   const commentBody = z.object({ body: z.string().trim().min(1).max(5000), mentions: z.array(z.number().int()).max(20).optional() });
 
   const loadComments = async (taskId: number) => {
-    const rows = await db.all<{ id: number; user_id: number; body: string; created_at: string; edited_at: string | null }>(
-      "SELECT id, user_id, body, created_at, edited_at FROM comments WHERE task_id = ? ORDER BY id",
+    const rows = await db.all<{ id: number; user_id: number; body: string; created_at: string; edited_at: string | null; requester: string | null }>(
+      "SELECT id, user_id, body, created_at, edited_at, requester FROM comments WHERE task_id = ? ORDER BY id",
       taskId,
     );
     if (rows.length === 0) return [];

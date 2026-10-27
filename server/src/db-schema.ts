@@ -59,7 +59,11 @@ CREATE TABLE IF NOT EXISTS projects (
   lead_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   start_date TEXT,
   target_date TEXT,
-  type TEXT NOT NULL DEFAULT 'initiative' CHECK (type IN ('delivery','pipeline','initiative','support'))
+  type TEXT NOT NULL DEFAULT 'initiative' CHECK (type IN ('delivery','pipeline','initiative','support')),
+  currency TEXT NOT NULL DEFAULT 'USD',
+  first_response_hours INTEGER,
+  resolution_hours INTEGER,
+  intake_token TEXT
 );
 -- Task statuses. Every status belongs to a category (todo, doing or done), which is what the app's logic (completion,
 -- recurrence, dependencies, progress) uses; the name and colour are the team's own. A status belongs either to one
@@ -73,6 +77,7 @@ CREATE TABLE IF NOT EXISTS statuses (
   category TEXT NOT NULL CHECK (category IN ('todo','doing','done')),
   color TEXT NOT NULL DEFAULT '#64748b',
   position INTEGER NOT NULL DEFAULT 0,
+  probability INTEGER CHECK (probability BETWEEN 0 AND 100),
   CHECK ((workspace_id IS NULL AND project_id IS NOT NULL) OR (workspace_id IS NOT NULL AND project_id IS NULL))
 );
 -- A project's history: progress updates (with a health rating) and stage changes (with an optional note).
@@ -121,7 +126,13 @@ CREATE TABLE IF NOT EXISTS tasks (
   assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   status_id INTEGER REFERENCES statuses(id) ON DELETE SET NULL,
   start_at TEXT,
-  milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL
+  milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL,
+  value ${REAL},
+  requester_name TEXT,
+  requester_email TEXT,
+  source TEXT NOT NULL DEFAULT 'internal' CHECK (source IN ('internal','form','email')),
+  ticket_no INTEGER,
+  first_response_at TEXT
 );
 CREATE TABLE IF NOT EXISTS task_tags (
   task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -185,7 +196,8 @@ CREATE TABLE IF NOT EXISTS comments (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   body TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT ${NOW_ISO},
-  edited_at TEXT
+  edited_at TEXT,
+  requester TEXT
 );
 CREATE TABLE IF NOT EXISTS comment_mentions (
   comment_id INTEGER NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
@@ -251,6 +263,8 @@ CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id);
 CREATE INDEX IF NOT EXISTS idx_projects_ws ON projects(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_ticket ON tasks(project_id, ticket_no) WHERE ticket_no IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_intake ON projects(intake_token) WHERE intake_token IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_statuses_ws ON statuses(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_statuses_project ON statuses(project_id);
 CREATE INDEX IF NOT EXISTS idx_project_updates ON project_updates(project_id, id);
@@ -280,7 +294,15 @@ export const ADDED_COLUMNS: Record<string, [string, string][]> = {
     ["status_id", "INTEGER REFERENCES statuses(id) ON DELETE SET NULL"],
     ["start_at", "TEXT"],
     ["milestone_id", "INTEGER REFERENCES milestones(id) ON DELETE SET NULL"],
+    ["value", "REAL"],
+    ["requester_name", "TEXT"],
+    ["requester_email", "TEXT"],
+    ["source", "TEXT NOT NULL DEFAULT 'internal' CHECK (source IN ('internal','form','email'))"],
+    ["ticket_no", "INTEGER"],
+    ["first_response_at", "TEXT"],
   ],
+  statuses: [["probability", "INTEGER CHECK (probability BETWEEN 0 AND 100)"]],
+  comments: [["requester", "TEXT"]],
   users: [["name", "TEXT"]],
   projects: [
     ["workspace_id", "INTEGER REFERENCES workspaces(id)"],
@@ -290,6 +312,10 @@ export const ADDED_COLUMNS: Record<string, [string, string][]> = {
     ["start_date", "TEXT"],
     ["target_date", "TEXT"],
     ["type", "TEXT NOT NULL DEFAULT 'initiative' CHECK (type IN ('delivery','pipeline','initiative','support'))"],
+    ["currency", "TEXT NOT NULL DEFAULT 'USD'"],
+    ["first_response_hours", "INTEGER"],
+    ["resolution_hours", "INTEGER"],
+    ["intake_token", "TEXT"],
   ],
 };
 

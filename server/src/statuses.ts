@@ -14,13 +14,15 @@ export interface StatusRow {
   category: Category;
   color: string;
   position: number;
+  /** Chance (0-100) that a deal in this status is won. Used by sales pipelines; null where not set. */
+  probability: number | null;
 }
 
 export const PROJECT_TYPES = ["delivery", "pipeline", "initiative", "support"] as const;
 export type ProjectType = (typeof PROJECT_TYPES)[number];
 
 /** The statuses a new project of each type starts with. An initiative uses the built-in To do / Doing / Done. */
-export const TYPE_STATUSES: Record<ProjectType, { name: string; category: Category; color: string }[]> = {
+export const TYPE_STATUSES: Record<ProjectType, { name: string; category: Category; color: string; probability?: number }[]> = {
   delivery: [
     { name: "To do", category: "todo", color: "#64748b" },
     { name: "Doing", category: "doing", color: "#2563eb" },
@@ -28,11 +30,11 @@ export const TYPE_STATUSES: Record<ProjectType, { name: string; category: Catego
     { name: "Done", category: "done", color: "#16a34a" },
   ],
   pipeline: [
-    { name: "New", category: "todo", color: "#64748b" },
-    { name: "Contacted", category: "doing", color: "#2563eb" },
-    { name: "Qualified", category: "doing", color: "#a855f7" },
-    { name: "Won", category: "done", color: "#16a34a" },
-    { name: "Lost", category: "done", color: "#dc2626" },
+    { name: "New", category: "todo", color: "#64748b", probability: 10 },
+    { name: "Contacted", category: "doing", color: "#2563eb", probability: 25 },
+    { name: "Qualified", category: "doing", color: "#a855f7", probability: 60 },
+    { name: "Won", category: "done", color: "#16a34a", probability: 100 },
+    { name: "Lost", category: "done", color: "#dc2626", probability: 0 },
   ],
   initiative: [],
   support: [
@@ -45,11 +47,11 @@ export const TYPE_STATUSES: Record<ProjectType, { name: string; category: Catego
 
 export async function seedProjectStatuses(q: Queryable, projectId: number, type: ProjectType): Promise<void> {
   for (const [i, s] of TYPE_STATUSES[type].entries()) {
-    await q.run("INSERT INTO statuses (workspace_id, project_id, name, category, color, position) VALUES (NULL, ?, ?, ?, ?, ?)", projectId, s.name, s.category, s.color, i);
+    await q.run("INSERT INTO statuses (workspace_id, project_id, name, category, color, position, probability) VALUES (NULL, ?, ?, ?, ?, ?, ?)", projectId, s.name, s.category, s.color, i, s.probability ?? null);
   }
 }
 
-const COLS = "id, workspace_id, project_id, name, category, color, position";
+const COLS = "id, workspace_id, project_id, name, category, color, position, probability";
 
 /** What a scope starts with when its owners choose to customise: the same three steps everyone already has. */
 const DEFAULTS: { name: string; category: Category; color: string }[] = [
@@ -98,8 +100,8 @@ const scopeBody = z
 
 const color = z.string().regex(/^#[0-9a-f]{6}$/i);
 const nameField = z.string().trim().min(1).max(40);
-const createBody = z.intersection(scopeBody, z.object({ name: nameField, category: z.enum(["todo", "doing", "done"]), color: color.optional() }));
-const updateBody = z.object({ name: nameField, color, position: z.number().int().min(0).max(1000) }).partial();
+const createBody = z.intersection(scopeBody, z.object({ name: nameField, category: z.enum(["todo", "doing", "done"]), color: color.optional(), probability: z.number().int().min(0).max(100).nullable().optional() }));
+const updateBody = z.object({ name: nameField, color, position: z.number().int().min(0).max(1000), probability: z.number().int().min(0).max(100).nullable() }).partial();
 
 interface Deps {
   db: DB;
@@ -139,7 +141,7 @@ export function registerStatuses(app: Express, { db, auth, uid }: Deps) {
     const me = uid(req);
     res.json(
       await db.all<StatusRow>(
-        `SELECT s.id, s.workspace_id, s.project_id, s.name, s.category, s.color, s.position FROM statuses s
+        `SELECT s.id, s.workspace_id, s.project_id, s.name, s.category, s.color, s.position, s.probability FROM statuses s
          WHERE s.workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id = ?)
             OR s.project_id IN (SELECT id FROM projects WHERE (workspace_id IS NULL AND user_id = ?)
                                    OR workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id = ?))
@@ -168,8 +170,8 @@ export function registerStatuses(app: Express, { db, auth, uid }: Deps) {
       if (rows.some((r) => r.name.toLowerCase() === b.name.toLowerCase())) throw new HttpError(409, "There is already a status with that name");
       const next = Math.max(-1, ...rows.map((r) => r.position)) + 1;
       return t.insert(
-        "INSERT INTO statuses (workspace_id, project_id, name, category, color, position) VALUES (?, ?, ?, ?, ?, ?)",
-        scope.workspace, scope.project, b.name, b.category, b.color ?? DEFAULTS.find((d) => d.category === b.category)!.color, next,
+        "INSERT INTO statuses (workspace_id, project_id, name, category, color, position, probability) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        scope.workspace, scope.project, b.name, b.category, b.color ?? DEFAULTS.find((d) => d.category === b.category)!.color, next, b.probability ?? null,
       );
     });
     res.status(201).json(await db.get(`SELECT ${COLS} FROM statuses WHERE id = ?`, id));
@@ -191,7 +193,10 @@ export function registerStatuses(app: Express, { db, auth, uid }: Deps) {
       if (clash) throw new HttpError(409, "There is already a status with that name");
     }
     // The category is fixed: changing it would silently complete or reopen every task that has the status.
-    await db.run("UPDATE statuses SET name = COALESCE(?, name), color = COALESCE(?, color), position = COALESCE(?, position) WHERE id = ?", b.name ?? null, b.color ?? null, b.position ?? null, s.id);
+    await db.tx(async (t) => {
+      await t.run("UPDATE statuses SET name = COALESCE(?, name), color = COALESCE(?, color), position = COALESCE(?, position) WHERE id = ?", b.name ?? null, b.color ?? null, b.position ?? null, s.id);
+      if (b.probability !== undefined) await t.run("UPDATE statuses SET probability = ? WHERE id = ?", b.probability, s.id);
+    });
     res.json(await loadStatus(s.id));
   });
 

@@ -1,12 +1,14 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api } from "./api";
 import { clearApiCaches, setCurrentUser } from "./lib/offline";
 import { LoginPage } from "./pages/LoginPage";
+import { PublicSupportPage } from "./pages/PublicSupportPage";
 import { Shell } from "./pages/Shell";
 
 export function App() {
+  const { pathname } = useLocation();
   const me = useQuery({ queryKey: ["me"], queryFn: api.me });
   const signedOut = !me.isLoading && !me.data;
 
@@ -15,6 +17,15 @@ export function App() {
   useEffect(() => {
     if (signedOut) void clearApiCaches();
   }, [signedOut]);
+
+  // A customer's support form: public, with no sign-in and none of the app around it.
+  if (pathname.startsWith("/support/")) {
+    return (
+      <Routes>
+        <Route path="/support/:token" element={<PublicSupportPage />} />
+      </Routes>
+    );
+  }
 
   if (me.isLoading) return <p className="center" role="status">Loading…</p>;
   const user = me.data;

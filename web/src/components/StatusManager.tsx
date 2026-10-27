@@ -6,14 +6,16 @@ import { BUILTIN } from "../lib/statuses";
 
 const CATEGORY_LABEL: Record<Category, string> = { todo: "Not started", doing: "In progress", done: "Finished" };
 
-function Row({ s, first, last, canManage, onMove, onChanged, onError }: {
-  s: Status; first: boolean; last: boolean; canManage: boolean;
+function Row({ s, first, last, canManage, showProbability, onMove, onChanged, onError }: {
+  s: Status; first: boolean; last: boolean; canManage: boolean; showProbability: boolean;
   onMove: (dir: -1 | 1) => void; onChanged: () => void; onError: (m: string | null) => void;
 }) {
   const [name, setName] = useState(s.name);
   useEffect(() => setName(s.name), [s.name]);
+  const [chance, setChance] = useState(s.probability === null ? "" : String(s.probability));
+  useEffect(() => setChance(s.probability === null ? "" : String(s.probability)), [s.probability]);
   const update = useMutation({
-    mutationFn: (p: Partial<Pick<Status, "name" | "color">>) => api.updateStatus(s.id, p),
+    mutationFn: (p: Partial<Pick<Status, "name" | "color" | "probability">>) => api.updateStatus(s.id, p),
     onSuccess: () => (onError(null), onChanged()),
     onError: (e) => (onError(e.message), setName(s.name)),
   });
@@ -35,6 +37,18 @@ function Row({ s, first, last, canManage, onMove, onChanged, onError }: {
         onKeyDown={(e) => e.key === "Enter" && (e.currentTarget.blur())}
       />
       <span className="muted small status-cat">{CATEGORY_LABEL[s.category]}</span>
+      {showProbability && (
+        <label className="chance" title="Chance that a deal in this stage is won. Used to weigh the pipeline forecast.">
+          <input
+            type="number" min={0} max={100} aria-label={`Win chance of ${s.name}`} disabled={!canManage} value={chance} placeholder="–"
+            onChange={(e) => setChance(e.target.value)}
+            onBlur={() => {
+              const next = chance === "" ? null : Math.min(100, Math.max(0, Math.round(Number(chance))));
+              if (next !== s.probability) update.mutate({ probability: next });
+            }}
+          />%
+        </label>
+      )}
       {canManage && (
         <span className="status-actions">
           <button type="button" className="icon sm" aria-label={`Move ${s.name} up`} disabled={first} onClick={() => onMove(-1)}><ArrowUp size={14} /></button>
@@ -58,7 +72,7 @@ function Row({ s, first, last, canManage, onMove, onChanged, onError }: {
  * Defines the statuses for a project or a workspace. With none defined, everything uses the built-in To do / Doing / Done;
  * customising starts from those three and lets the team rename, recolour, reorder, add and remove.
  */
-export function StatusManager({ scope, canManage, inheritedFrom }: { scope: StatusScope; canManage: boolean; inheritedFrom?: string }) {
+export function StatusManager({ scope, canManage, inheritedFrom, showProbability = false }: { scope: StatusScope; canManage: boolean; inheritedFrom?: string; showProbability?: boolean }) {
   const qc = useQueryClient();
   const all = useQuery({ queryKey: ["statuses"], queryFn: api.statuses });
   const own = (all.data ?? [])
@@ -120,12 +134,14 @@ export function StatusManager({ scope, canManage, inheritedFrom }: { scope: Stat
                 first={i === 0}
                 last={i === own.length - 1}
                 canManage={canManage}
+                showProbability={showProbability}
                 onMove={(dir) => reorder.mutate({ a: s, b: own[i + dir] })}
                 onChanged={refresh}
                 onError={setError}
               />
             ))}
           </ul>
+          {showProbability && <p className="muted small">The percentage is the chance a deal in that stage is won; it weighs the forecast. A finished stage at 0% counts as lost.</p>}
           <p className="muted small">The grey label is the stage a status belongs to. It decides what counts as finished, and it can't be changed once a status exists.</p>
           {canManage && (
             <>

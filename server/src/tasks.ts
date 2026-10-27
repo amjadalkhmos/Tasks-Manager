@@ -10,6 +10,7 @@ import { logActivity, notify, userName } from "./events.js";
 import { HttpError, parseId } from "./http-error.js";
 import { nextOccurrence, parseRule, recurrenceSchema } from "./recurrence.js";
 import { assertLeadAllowed } from "./pm.js";
+import { sla } from "./sla.js";
 import { PROJECT_TYPES, keepOrPick, seedProjectStatuses, statusFits, statusFor } from "./statuses.js";
 
 const iso = z.string().datetime({ offset: true });
@@ -25,6 +26,9 @@ const taskFields = {
   status_id: z.number().int().nullable(),
   start_at: iso.nullable(),
   milestone_id: z.number().int().nullable(),
+  value: z.number().min(0).max(1e12).nullable(),
+  requester_name: z.string().trim().max(100).nullable(),
+  requester_email: z.string().trim().email().max(200).nullable(),
   due_at: iso.nullable(),
   remind_at: iso.nullable(),
   recurrence: recurrenceSchema.nullable(),
@@ -42,10 +46,13 @@ const projectBody = z.object({
   type: z.enum(PROJECT_TYPES),
   description: z.string().max(5000),
   lead_id: z.number().int().nullable(),
+  currency: z.string().regex(/^[A-Z]{3}$/, "Use a three-letter currency code, like USD"),
+  first_response_hours: z.number().int().min(1).max(8760).nullable(),
+  resolution_hours: z.number().int().min(1).max(8760).nullable(),
   start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((v) => !Number.isNaN(Date.parse(v)), "Not a real date").nullable(),
   target_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((v) => !Number.isNaN(Date.parse(v)), "Not a real date").nullable(),
 });
-const PROJECT_COLS = "id, name, color, workspace_id, type, description, stage, lead_id, start_date, target_date";
+const PROJECT_COLS = "id, name, color, workspace_id, type, description, stage, lead_id, start_date, target_date, currency, first_response_hours, resolution_hours";
 
 interface Deps {
   db: DB;
@@ -105,10 +112,12 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
 
     const projectIds = [...new Set(rows.map((r) => r.project_id).filter((p): p is number => p !== null))];
     const [projects, memberships] = await Promise.all([
-      inChunks(projectIds, (m, a) => q.all<{ id: number; workspace_id: number | null }>(`SELECT id, workspace_id FROM projects WHERE id IN (${m})`, ...a)),
+      inChunks(projectIds, (m, a) => q.all<{ id: number; workspace_id: number | null; first_response_hours: number | null; resolution_hours: number | null }>(`SELECT id, workspace_id, first_response_hours, resolution_hours FROM projects WHERE id IN (${m})`, ...a)),
       q.all<{ workspace_id: number; role: Role }>("SELECT workspace_id, role FROM workspace_members WHERE user_id = ?", userId),
     ]);
     const wsOfProject = new Map(projects.map((p) => [p.id, p.workspace_id]));
+    const targetsOf = new Map(projects.map((p) => [p.id, { first_response_hours: p.first_response_hours, resolution_hours: p.resolution_hours }]));
+    const now = new Date();
     const roleOf = new Map(memberships.map((m) => [m.workspace_id, m.role]));
 
     const tags = groupBy(tagRows, (r) => r.task_id);
@@ -146,6 +155,8 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
         can_delete: access === "admin" || (access === "write" && r.user_id === userId),
         comment_count: comments.get(r.id) ?? 0,
         meeting_count: meetings.get(r.id) ?? 0,
+        // Support tickets only: the clocks for the project's service targets.
+        sla: r.ticket_no != null && r.project_id !== null ? sla(r as unknown as Parameters<typeof sla>[0], targetsOf.get(r.project_id)!, now) : null,
       };
     });
   }
@@ -160,6 +171,8 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
       status_id: number | null;
       start_at: string | null;
       milestone_id: number | null;
+      ticket_no: number | null;
+      first_response_at: string | null;
     };
   };
 
@@ -197,6 +210,14 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     if (projectId === null || !(await q.get("SELECT 1 FROM milestones WHERE id = ? AND project_id = ?", milestoneId, projectId))) {
       throw new HttpError(400, "That milestone doesn't belong to this project");
     }
+  };
+
+  /** Tickets are numbered per support project (#1, #2…); work in any other project has no number. */
+  const nextTicketNo = async (q: Queryable, projectId: number | null): Promise<number | null> => {
+    if (projectId === null) return null;
+    const p = await q.get<{ type: string }>("SELECT type FROM projects WHERE id = ?", projectId);
+    if (p?.type !== "support") return null;
+    return (await q.get<{ n: number }>("SELECT COALESCE(MAX(ticket_no), 0) + 1 AS n FROM tasks WHERE project_id = ?", projectId))!.n;
   };
 
   const assertAssignable = async (q: Queryable, workspaceId: number | null, assigneeId: number) => {
@@ -241,7 +262,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
   });
 
   app.patch("/api/projects/:id", auth, async (req, res) => {
-    const b = projectBody.pick({ name: true, color: true, type: true, description: true, lead_id: true, start_date: true, target_date: true }).partial().parse(req.body);
+    const b = projectBody.pick({ name: true, color: true, type: true, description: true, lead_id: true, start_date: true, target_date: true, currency: true, first_response_hours: true, resolution_hours: true }).partial().parse(req.body);
     const pa = await projectAccess(db, uid(req), parseId(req.params.id, "Project not found"));
     if (!pa) throw new HttpError(404, "Project not found");
     if (pa.workspaceId !== null && !(pa.canManage || (pa.canWrite && pa.creatorId === uid(req)))) throw FORBIDDEN();
@@ -250,6 +271,9 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
       await t.run("UPDATE projects SET name = COALESCE(?, name), color = COALESCE(?, color), type = COALESCE(?, type), description = COALESCE(?, description) WHERE id = ?", b.name ?? null, b.color ?? null, b.type ?? null, b.description ?? null, pa.id);
       // These can be cleared, so they are set only when given (null clears).
       if (b.lead_id !== undefined) await t.run("UPDATE projects SET lead_id = ? WHERE id = ?", b.lead_id, pa.id);
+      if (b.currency !== undefined) await t.run("UPDATE projects SET currency = ? WHERE id = ?", b.currency, pa.id);
+      if (b.first_response_hours !== undefined) await t.run("UPDATE projects SET first_response_hours = ? WHERE id = ?", b.first_response_hours, pa.id);
+      if (b.resolution_hours !== undefined) await t.run("UPDATE projects SET resolution_hours = ? WHERE id = ?", b.resolution_hours, pa.id);
       if (b.start_date !== undefined) await t.run("UPDATE projects SET start_date = ? WHERE id = ?", b.start_date, pa.id);
       if (b.target_date !== undefined) await t.run("UPDATE projects SET target_date = ? WHERE id = ?", b.target_date, pa.id);
     });
@@ -383,12 +407,14 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     if (b.milestone_id != null) await checkMilestone(db, b.milestone_id, projectId);
 
     const id = await db.tx(async (t) => {
+      const ticketNo = b.parent_id == null ? await nextTicketNo(t, projectId) : null;
       const taskId = await t.insert(
-        `INSERT INTO tasks (user_id, project_id, parent_id, assignee_id, title, notes, priority, status, status_id, due_at, remind_at, recurrence_rule, completed_at, position, estimate_min, start_at, milestone_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(CAST(? AS REAL), (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE user_id = ?)), ?, ?, ?)`,
+        `INSERT INTO tasks (user_id, project_id, parent_id, assignee_id, title, notes, priority, status, status_id, due_at, remind_at, recurrence_rule, completed_at, position, estimate_min, start_at, milestone_id, value, requester_name, requester_email, ticket_no)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(CAST(? AS REAL), (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE user_id = ?)), ?, ?, ?, ?, ?, ?, ?)`,
         me, projectId, b.parent_id ?? null, b.assignee_id ?? null, b.title, b.notes ?? "", b.priority ?? 0, status, statusId,
         b.due_at ?? null, b.remind_at ?? null, b.recurrence ? JSON.stringify(b.recurrence) : null,
         status === "done" ? new Date().toISOString() : null, b.position ?? null, me, b.estimate_min ?? null, b.start_at ?? null, b.milestone_id ?? null,
+        b.value ?? null, b.requester_name ?? null, b.requester_email ?? null, ticketNo,
       );
       await setTags(t, me, taskId, b.tags ?? []);
       await logActivity(t, workspaceId, me, "task_created", taskId, { title: b.title });
@@ -471,13 +497,17 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
         sets.push(`${col} = ?`);
         args.push(val);
       };
-      for (const key of ["title", "notes", "priority", "status", "due_at", "start_at", "position", "estimate_min"] as const) {
+      for (const key of ["title", "notes", "priority", "status", "due_at", "start_at", "position", "estimate_min", "value", "requester_name", "requester_email"] as const) {
         if (b[key] !== undefined) set(key, b[key]);
       }
       if (newProject !== current.project_id) set("project_id", newProject);
       if (newParent !== current.parent_id) set("parent_id", newParent);
       if (newStatusId !== current.status_id) set("status_id", newStatusId);
       if (newMilestone !== current.milestone_id) set("milestone_id", newMilestone);
+      // Moving a task into or out of a support project numbers it, or takes its number away.
+      if (newProject !== current.project_id) set("ticket_no", current.parent_id === null ? await nextTicketNo(t, newProject) : null);
+      // A ticket's first response is the moment someone picks it up.
+      if (b.status !== undefined && b.status !== "todo" && current.status === "todo" && current.ticket_no != null && !current.first_response_at) set("first_response_at", new Date().toISOString());
       if (newAssignee !== current.assignee_id) set("assignee_id", newAssignee);
       if (b.remind_at !== undefined) {
         set("remind_at", b.remind_at);
@@ -537,6 +567,15 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     res.status(204).end();
   });
 
+  /** Marks a support ticket as answered (stops its first-response clock). */
+  app.post("/api/tasks/:id/respond", auth, async (req, res) => {
+    const me = uid(req);
+    const ta = await writableTask(db, me, parseId(req.params.id, "Task not found"));
+    if (ta.row.ticket_no == null) throw new HttpError(409, "Only support tickets have a first response");
+    await db.run("UPDATE tasks SET first_response_at = COALESCE(first_response_at, ?) WHERE id = ?", new Date().toISOString(), ta.row.id);
+    res.json(await getTask(me, ta.row.id));
+  });
+
   app.post("/api/tasks/:id/complete", auth, async (req, res) => {
     const me = uid(req);
     const ta = await writableTask(db, me, parseId(req.params.id, "Task not found"));
@@ -548,7 +587,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     if (chosen !== undefined && (await statusFits(db, chosen, task.project_id, task.workspace_id)).category !== "done") throw new HttpError(400, "That isn't a done status");
     const nextId = await db.tx(async (t) => {
       const doneId = chosen ?? (await keepOrPick(t, task.status_id as number | null, task.project_id, task.workspace_id, "done"));
-      await t.run("UPDATE tasks SET status = 'done', status_id = ?, completed_at = ? WHERE id = ?", doneId, new Date().toISOString(), task.id);
+      await t.run("UPDATE tasks SET status = 'done', status_id = ?, completed_at = ?, first_response_at = COALESCE(first_response_at, CASE WHEN ticket_no IS NULL THEN NULL ELSE CAST(? AS TEXT) END) WHERE id = ?", doneId, new Date().toISOString(), new Date().toISOString(), task.id);
       await logActivity(t, ta.workspaceId, me, "task_completed", task.id, { title: task.title });
       if (!task.recurrence) return null;
       const due = nextOccurrence(task.due_at ?? new Date().toISOString(), task.recurrence);

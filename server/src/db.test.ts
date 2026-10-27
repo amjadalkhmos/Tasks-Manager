@@ -217,6 +217,11 @@ describe("IN-list helpers", () => {
 describe("upgrading an existing database", () => {
   it("adds columns and tables introduced since it was created", async () => {
     // Put the database back the way an earlier version left it: no statuses, no project details.
+    await db.exec(`DROP INDEX idx_tasks_ticket; DROP INDEX idx_projects_intake`);
+    for (const c of ["value", "requester_name", "requester_email", "source", "ticket_no", "first_response_at"]) await db.exec(`ALTER TABLE tasks DROP COLUMN ${c}`);
+    for (const c of ["currency", "first_response_hours", "resolution_hours", "intake_token"]) await db.exec(`ALTER TABLE projects DROP COLUMN ${c}`);
+    await db.exec(`ALTER TABLE statuses DROP COLUMN probability`);
+    await db.exec(`ALTER TABLE comments DROP COLUMN requester`);
     await db.exec(`DROP INDEX idx_tasks_milestone; DROP INDEX idx_tasks_status`);
     await db.exec(`ALTER TABLE tasks DROP COLUMN milestone_id`);
     await db.exec(`ALTER TABLE tasks DROP COLUMN start_at`);
@@ -240,5 +245,7 @@ describe("upgrading an existing database", () => {
     expect(await db.get("SELECT start_at, milestone_id FROM tasks WHERE user_id = ?", uid)).toEqual({ start_at: null, milestone_id: null });
     expect(await db.get("SELECT status_id FROM tasks WHERE user_id = ?", uid)).toEqual({ status_id: null });
     expect(await db.get("SELECT COUNT(*) AS n FROM statuses")).toEqual({ n: 0 });
+    expect(await db.get("SELECT source, ticket_no, value FROM tasks WHERE user_id = ?", uid)).toEqual({ source: "internal", ticket_no: null, value: null });
+    expect(await db.get("SELECT currency, intake_token FROM projects WHERE id = ?", pid)).toEqual({ currency: "USD", intake_token: null });
   });
 });

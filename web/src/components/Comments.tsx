@@ -53,15 +53,15 @@ export function Comments({ task, members, meId }: { task: Task; members: Member[
       <ul className="comments">
         {comments.data?.map((c) => (
           <li key={c.id} className="comment">
-            <Avatar id={c.user_id} name={nameOf(c.user_id)} size={26} />
+            <Avatar id={c.requester ? c.id * 7 : c.user_id} name={c.requester ?? nameOf(c.user_id)} size={26} />
             <div className="comment-main">
               <div className="comment-head">
-                <strong>{c.user_id === meId ? "You" : nameOf(c.user_id)}</strong>
+                <strong>{c.requester ? <>{c.requester} <span className="muted small">(customer)</span></> : c.user_id === meId ? "You" : nameOf(c.user_id)}</strong>
                 <span className="muted small" title={new Date(c.created_at).toLocaleString()}>
                   {timeAgo(c.created_at)}{c.edited_at ? " · edited" : ""}
                 </span>
                 <span className="comment-actions">
-                  {c.user_id === meId && canComment && (
+                  {c.user_id === meId && !c.requester && canComment && (
                     <button type="button" className="icon sm" aria-label="Edit comment" onClick={() => setEditing(c.id)}><Pencil size={13} /></button>
                   )}
                   {(c.user_id === meId || task.access === "admin") && (

@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AtSign, BellOff, Check, MessageSquare, UserCheck, UserMinus, UserPlus } from "lucide-react";
+import { AtSign, BellOff, Check, LifeBuoy, MessageSquare, UserCheck, UserMinus, UserPlus } from "lucide-react";
 import type { ReactNode } from "react";
 import { api, type Alert } from "../api";
 import { Avatar } from "../components/Avatar";
@@ -14,6 +14,7 @@ const ICONS: Record<Alert["kind"], ReactNode> = {
   commented: <MessageSquare size={15} />,
   invite_accepted: <UserPlus size={15} />,
   removed: <UserMinus size={15} />,
+  ticket: <LifeBuoy size={15} />,
 };
 
 function sentence(a: Alert, actor: string): ReactNode {
@@ -23,6 +24,7 @@ function sentence(a: Alert, actor: string): ReactNode {
     case "mentioned": return <>{actor} mentioned you on {t}</>;
     case "commented": return <>{actor} commented on {t}</>;
     case "invite_accepted": return <>{actor} joined <strong>{a.title}</strong></>;
+    case "ticket": return <>New support ticket {t}</>;
     case "removed": return <>You were removed from <strong>{a.title}</strong></>;
   }
 }

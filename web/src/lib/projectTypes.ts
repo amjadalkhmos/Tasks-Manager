@@ -7,7 +7,7 @@ export interface TypeInfo {
   /** What it starts with. */
   starts: string;
   /** The view the Work tab opens on. */
-  view: "list" | "board" | "timeline";
+  view: "list" | "board" | "timeline" | "queue";
 }
 
 export const PROJECT_TYPES: ProjectType[] = ["delivery", "pipeline", "support", "initiative"];
@@ -22,14 +22,14 @@ export const TYPE_INFO: Record<ProjectType, TypeInfo> = {
   pipeline: {
     label: "Sales pipeline",
     blurb: "Leads moving through stages until they're won or lost.",
-    starts: "New · Contacted · Qualified · Won · Lost, as a board",
+    starts: "New · Contacted · Qualified · Won · Lost, as a board with deal values and a forecast",
     view: "board",
   },
   support: {
     label: "Support",
     blurb: "Requests from customers that need an answer.",
-    starts: "New · In progress · Waiting on customer · Resolved, as a board",
-    view: "board",
+    starts: "New · In progress · Waiting on customer · Resolved, as a queue with service clocks",
+    view: "queue",
   },
   initiative: {
     label: "Initiative",

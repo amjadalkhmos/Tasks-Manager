@@ -31,6 +31,15 @@ export interface Task {
   /** When work is planned to begin (ISO); with due_at it gives the task a span on the timeline. */
   start_at: string | null;
   milestone_id: number | null;
+  /** A deal's worth (sales pipelines). */
+  value: number | null;
+  /** Support tickets: who asked, where it came from, its number and its service clocks. */
+  requester_name: string | null;
+  requester_email: string | null;
+  source: "internal" | "form" | "email";
+  ticket_no: number | null;
+  first_response_at: string | null;
+  sla: Sla | null;
   due_at: string | null;
   remind_at: string | null;
   recurrence: Recurrence | null;
@@ -119,6 +128,18 @@ export interface Status {
   category: Category;
   color: string;
   position: number;
+  /** Chance (0-100) a deal in this status is won; sales pipelines. */
+  probability: number | null;
+}
+
+export type SlaState = "met" | "late" | "pending" | "at_risk" | "breached";
+export interface SlaClock {
+  due: string;
+  state: SlaState;
+}
+export interface Sla {
+  response: SlaClock | null;
+  resolution: SlaClock | null;
 }
 
 export type ProjectType = "delivery" | "pipeline" | "initiative" | "support";
@@ -138,6 +159,9 @@ export interface Project {
   /** YYYY-MM-DD */
   start_date: string | null;
   target_date: string | null;
+  currency: string;
+  first_response_hours: number | null;
+  resolution_hours: number | null;
 }
 
 export interface Milestone {
@@ -238,6 +262,40 @@ export interface ProjectOverview {
   time: { tracked_min: number; estimate_min: number };
   milestones: MilestoneProgress[];
   updates: ProjectUpdate[];
+  pipeline: PipelineForecast | null;
+  support: SupportStats | null;
+  /** The public form link and email address; only for people who manage a support project. */
+  intake: { enabled: boolean; token: string | null } | null;
+}
+
+export interface PipelineForecast {
+  currency: string;
+  open_count: number;
+  open_value: number;
+  weighted_value: number;
+  won_count: number;
+  won_value: number;
+  lost_count: number;
+  lost_value: number;
+  win_rate: number | null;
+  avg_won_value: number | null;
+  by_stage: { id: number | null; name: string; color: string; category: Category; probability: number | null; count: number; value: number; weighted: number }[];
+  by_month: { month: string; count: number; value: number; weighted: number }[];
+  no_close_date: { count: number; value: number };
+}
+
+export interface SupportStats {
+  open: number;
+  unanswered: number;
+  response_breached: number;
+  resolution_breached: number;
+  at_risk: number;
+  avg_first_response_min: number | null;
+  avg_resolution_min: number | null;
+  created_7d: number;
+  resolved_7d: number;
+  by_priority: { priority: number; open: number }[];
+  targets: { first_response_hours: number | null; resolution_hours: number | null };
 }
 
 export type StatusScope = { project_id: number } | { workspace_id: number };
@@ -291,6 +349,8 @@ export interface Comment {
   body: string;
   created_at: string;
   edited_at: string | null;
+  /** Set when the words are a customer's (emailed in), not a teammate's. */
+  requester: string | null;
   mentions: { id: number; name: string }[];
 }
 
@@ -305,7 +365,7 @@ export interface ActivityItem {
 
 export interface Alert {
   id: number;
-  kind: "assigned" | "mentioned" | "commented" | "invite_accepted" | "removed";
+  kind: "assigned" | "mentioned" | "commented" | "invite_accepted" | "removed" | "ticket";
   actor_id: number | null;
   task_id: number | null;
   workspace_id: number | null;
@@ -417,9 +477,14 @@ export const api = {
   projects: () => request<Project[]>("GET", "/projects"),
   createProject: (name: string, workspaceId?: number, extra: Partial<Pick<Project, "type" | "color" | "description" | "lead_id" | "start_date" | "target_date">> = {}) =>
     request<Project>("POST", "/projects", { name, ...(workspaceId ? { workspace_id: workspaceId } : {}), ...extra }),
+  setIntake: (id: number, enabled: boolean, rotate = false) => request<{ enabled: boolean; token: string | null }>("POST", `/projects/${id}/intake`, { enabled, rotate }),
+  respond: (taskId: number) => request<Task>("POST", `/tasks/${taskId}/respond`),
+  publicDesk: (token: string) => request<{ name: string }>("GET", `/public/support/${token}`),
+  publicTicket: (token: string, t: { name: string; email: string; subject: string; message: string; website?: string }) =>
+    request<{ ticket_no: number | null }>("POST", `/public/support/${token}`, t),
   attention: () => request<Attention>("GET", "/attention"),
   renameProject: (id: number, name: string) => request<Project>("PATCH", `/projects/${id}`, { name }),
-  updateProject: (id: number, p: Partial<Pick<Project, "name" | "color" | "type" | "description" | "lead_id" | "start_date" | "target_date">>) =>
+  updateProject: (id: number, p: Partial<Pick<Project, "name" | "color" | "type" | "description" | "lead_id" | "start_date" | "target_date" | "currency" | "first_response_hours" | "resolution_hours">>) =>
     request<Project>("PATCH", `/projects/${id}`, p),
   setStage: (id: number, stage: Stage, note?: string, force?: boolean) => request<Project>("POST", `/projects/${id}/stage`, { stage, note, force }),
   portfolio: () => request<PortfolioRow[]>("GET", "/portfolio"),
@@ -433,7 +498,7 @@ export const api = {
   statuses: () => request<Status[]>("GET", "/statuses"),
   seedStatuses: (scope: StatusScope) => request<Status[]>("POST", "/statuses/defaults", scope),
   addStatus: (scope: StatusScope, s: { name: string; category: Category; color?: string }) => request<Status>("POST", "/statuses", { ...scope, ...s }),
-  updateStatus: (id: number, s: Partial<Pick<Status, "name" | "color" | "position">>) => request<Status>("PATCH", `/statuses/${id}`, s),
+  updateStatus: (id: number, s: Partial<Pick<Status, "name" | "color" | "position" | "probability">>) => request<Status>("PATCH", `/statuses/${id}`, s),
   deleteStatus: (id: number) => request<void>("DELETE", `/statuses/${id}`),
   resetStatuses: (scope: StatusScope) =>
     request<void>("DELETE", `/statuses?${"project_id" in scope ? `project_id=${scope.project_id}` : `workspace_id=${scope.workspace_id}`}`),

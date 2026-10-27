@@ -27,6 +27,8 @@ A task manager you can use alone or with a team. Capture a task in one line, pla
 - **One project home.** Each project has an **Overview** (what needs attention, progress, milestones, work by status and by person, updates), **Work** (list, board or timeline) and **Settings**. Managers open on the Overview; everyone else opens on their work.
 - **Plan over time.** Tasks have an optional start date and belong to a milestone, so a milestone shows its own progress and warns when its tasks are late or scheduled after its date. The timeline shows tasks as bars under their milestones. Progress is weighted by estimates (a task with no estimate counts as an hour), and the numbers also suggest a health (on track / at risk / off track) beside the team's own rating.
 - **Life cycle**: Planning → Active → On hold / Completed → Archived, with the allowed moves enforced, a note and history for every change, a warning before completing a project with open tasks, and archived projects hidden from the sidebar (and closed to new tasks) until restored.
+- **Sales pipeline.** Deals are tasks with a value and an expected close date. Each stage has a chance of winning (10 / 25 / 60 / 100 / 0 % to start, editable in Settings), so the Overview can show the open pipeline, a **weighted forecast**, what was won and lost, the win rate, and what is expected to close each month. The board shows each deal's value and each stage's total. Each project has its own currency.
+- **Support desk.** Tickets are tasks numbered #1, #2… in a Support project, with a requester, a source (form, email or team), a first-reply target and a resolution target. The **Queue** lists open tickets most urgent first, with a clock on each (due in…, at risk, overdue), and the Overview shows open, unanswered and late tickets and average reply and resolution times. Customers don't need an account: turn on **customer intake** in the project's Settings to get a public form link and an email address. Emailed replies that keep “[#123]” in the subject join ticket 123 (only from the person who raised it).
 - **For team members:** *My work* lists everything assigned to you across projects, soonest first. **For managers:** *Needs attention* shows projects drifting off plan, overdue and blocked work, unassigned work and who is carrying how much, across the workspaces you manage. *Projects* compares every project side by side.
 
 **Works anywhere**
@@ -129,6 +131,7 @@ Everything is set with environment variables. In production, only `JWT_SECRET` i
 | `DB_FILE` | `tasks.db` | Path of the SQLite database, used when `DATABASE_URL` is not set (`/data/tasks.db` in Docker). |
 | `PG_POOL_MAX` | `10` | Maximum PostgreSQL connections held by one app instance. |
 | `PG_SSL` | – | `no-verify` encrypts the PostgreSQL connection without checking the server's certificate. A last resort; prefer `?sslmode=require`. |
+| `TRUST_PROXY` | – | Set to `1` behind one reverse proxy (Railway, nginx) so the public form's rate limits see each visitor's real address. |
 | `PORT` | `3000` | Port the server listens on (hosts like Railway set this for you). |
 | `COOKIE_SECURE` | `true` in production | Set `false` to allow login over plain HTTP. |
 | `ANTHROPIC_API_KEY` | – | Turns on the AI helpers. (`AI_ENABLED=1` also works if the server has other Anthropic credentials.) |
@@ -174,6 +177,7 @@ What is **not** covered by tests that touch the real world:
 
 ## Limitations to know about
 
+- **Support intake is inbound only.** Tickets arrive from the public form or from your mail provider forwarding messages to a webhook; the app doesn't send email, so reply to customers from your own mailbox and use “Mark first response” on the ticket. There is no pause on the clocks while waiting for a customer, and no CAPTCHA on the form (a hidden field, rate limits and a link you can rotate are the protection).
 - **No email is sent.** Workspace invitations appear under *Notifications* when the person signs in with the invited address (they can create the account first).
 - **Updates are not real-time.** The app checks for new notifications every 30 seconds and when you return to the window.
 - **Offline writes** cover task create, edit, complete and delete. Other changes (projects, comments, workspaces) need a connection and say so.

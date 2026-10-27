@@ -8,6 +8,8 @@ import { MeetingDrawer } from "../components/MeetingDrawer";
 import { TaskMeetings } from "../components/TaskMeetings";
 import { describeActivity } from "../lib/activity";
 import { usePeople } from "../lib/people";
+import { clockText } from "../lib/sla";
+import { SlaBadge } from "../components/SlaBadge";
 import { statusOf, useStatuses } from "../lib/statuses";
 import { fromLocalInput, toLocalInput } from "../lib/datetime";
 import { formatMinutes } from "../lib/tasks";
@@ -143,6 +145,9 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
         ...(statusChanged && !becomesDone ? (d.status_id !== null ? { status_id: d.status_id } : { status: d.status, status_id: null }) : {}),
         ...(task && d.project_id === task.project_id && d.milestone_id !== task.milestone_id ? { milestone_id: d.milestone_id } : {}),
         start_at: d.start_at,
+        value: d.value,
+        requester_name: d.requester_name?.trim() || null,
+        requester_email: d.requester_email?.trim() || null,
         title: d.title,
         notes: d.notes,
         priority: d.priority,
@@ -159,6 +164,7 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
     },
     onSuccess: () => actions.refresh().then(onClose),
   });
+  const respond = useMutation({ mutationFn: () => api.respond(id), onSuccess: actions.refresh });
   const remove = useMutation({ mutationFn: () => api.deleteTask(id), onSuccess: () => actions.refresh().then(onClose) });
   const addSub = useMutation({
     mutationFn: ({ parentId, title }: { parentId: number; title: string }) =>
@@ -198,6 +204,7 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
   // Prerequisites must live in the same place (same workspace, or both private) and be editable by this person.
   const depCandidates = all.filter((t) => t.id !== id && t.status !== "done" && !task.blocked_by.includes(t.id) && t.workspace_id === task.workspace_id && t.access !== "read");
   const readOnly = task.access === "read";
+  const draftType = (projects.data ?? []).find((p) => p.id === draft.project_id)?.type;
   const draftWorkspace = (projects.data ?? []).find((p) => p.id === draft.project_id)?.workspace_id ?? null;
   const placeStatuses = statuses.forPlace(draft.project_id, draftWorkspace);
   const members = wsDetail.data?.members ?? [];
@@ -227,6 +234,31 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
             <p className="blocked-note"><Lock size={15} />Blocked until its prerequisites are done.</p>
           )}
           {readOnly && <p className="blocked-note view-only"><Eye size={15} />View only. You can read this task but not change it.</p>}
+          {task.ticket_no !== null && (
+            <section className="ticket-box" aria-label="Support ticket">
+              <div className="ticket-head">
+                <strong>Ticket #{task.ticket_no}</strong>
+                <span className="muted small">
+                  {task.source === "form" ? "via the support form" : task.source === "email" ? "via email" : "logged by the team"}
+                </span>
+              </div>
+              {(task.requester_name || task.requester_email) && (
+                <p className="small">
+                  {task.requester_name}
+                  {task.requester_email && <> · <a href={`mailto:${task.requester_email}?subject=${encodeURIComponent(`Re: ${task.title} [#${task.ticket_no}]`)}`}>{task.requester_email}</a></>}
+                </p>
+              )}
+              <div className="ticket-clocks">
+                {task.sla?.response && <SlaBadge clock={clockText("Reply", task.sla.response)} />}
+                {task.sla?.resolution && <SlaBadge clock={clockText("Resolution", task.sla.resolution)} />}
+                {!task.first_response_at && !readOnly && (
+                  <button type="button" className="secondary sm" disabled={respond.isPending} onClick={() => respond.mutate()}>Mark first response</button>
+                )}
+                {task.first_response_at && <span className="muted small">Answered {new Date(task.first_response_at).toLocaleString()}</span>}
+              </div>
+              <p className="muted small">Replies from the customer by email appear in the comments below. Reply to them from your own mailbox, keeping “[#{task.ticket_no}]” in the subject so it joins this ticket.</p>
+            </section>
+          )}
           <input className="title-input" aria-label="Title" readOnly={readOnly} value={draft.title} onChange={(e) => patch({ title: e.target.value })} />
           <textarea
             className="notes-input"
@@ -312,7 +344,22 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
             <Prop icon={<CalendarDays size={15} />} label="Start">
               <input type="datetime-local" aria-label="Start" value={toLocalInput(draft.start_at)} onChange={(e) => patch({ start_at: fromLocalInput(e.target.value) })} />
             </Prop>
-            <Prop icon={<CalendarDays size={15} />} label="Due">
+            {draftType === "pipeline" && (
+              <Prop icon={<Flag size={15} />} label="Deal value">
+                <input type="number" min={0} step="any" aria-label="Deal value" value={draft.value ?? ""} onChange={(e) => patch({ value: e.target.value === "" ? null : Math.max(0, Number(e.target.value)) })} />
+              </Prop>
+            )}
+            {draftType === "support" && (
+              <>
+                <Prop icon={<UserCheck size={15} />} label="Requester">
+                  <input aria-label="Requester name" placeholder="Name" value={draft.requester_name ?? ""} maxLength={100} onChange={(e) => patch({ requester_name: e.target.value })} />
+                </Prop>
+                <Prop icon={<Hash size={15} />} label="Requester email">
+                  <input type="email" aria-label="Requester email" placeholder="name@example.com" value={draft.requester_email ?? ""} maxLength={200} onChange={(e) => patch({ requester_email: e.target.value })} />
+                </Prop>
+              </>
+            )}
+            <Prop icon={<CalendarDays size={15} />} label={draftType === "pipeline" ? "Expected close" : "Due"}>
               <input type="datetime-local" aria-label="Due" value={toLocalInput(draft.due_at)} onChange={(e) => patch({ due_at: fromLocalInput(e.target.value) })} />
             </Prop>
             <Prop icon={<Bell size={15} />} label="Remind me">

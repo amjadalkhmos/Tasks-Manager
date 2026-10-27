@@ -22,7 +22,7 @@ export type ActivityKind =
   | "meeting_linked"
   | "meeting_unlinked";
 
-export type AlertKind = "assigned" | "mentioned" | "commented" | "invite_accepted" | "removed";
+export type AlertKind = "assigned" | "mentioned" | "commented" | "invite_accepted" | "removed" | "ticket";
 
 /** Records something that happened in a workspace. Personal (no workspace) activity is not logged. */
 export async function logActivity(
@@ -40,9 +40,9 @@ export async function logActivity(
 /** Tells someone about something. Nobody is notified about their own actions. */
 export async function notify(
   db: Queryable,
-  a: { userId: number; kind: AlertKind; actorId: number; taskId?: number | null; workspaceId?: number | null; title?: string },
+  a: { userId: number; kind: AlertKind; actorId: number | null; taskId?: number | null; workspaceId?: number | null; title?: string },
 ): Promise<void> {
-  if (a.userId === a.actorId) return;
+  if (a.actorId !== null && a.userId === a.actorId) return;
   await db.run(
     "INSERT INTO alerts (user_id, kind, actor_id, task_id, workspace_id, title) VALUES (?, ?, ?, ?, ?, ?)",
     a.userId, a.kind, a.actorId, a.taskId ?? null, a.workspaceId ?? null, (a.title ?? "").slice(0, 200),

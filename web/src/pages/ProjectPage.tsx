@@ -4,6 +4,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Trash2, X } from "lucide-react";
 import { api, type Health, type Project, type ProjectOverview, type ProjectType, type Stage, type Task } from "../api";
 import { Board } from "../components/Board";
+import { ForecastPanel } from "../components/ForecastPanel";
+import { IntakeSettings } from "../components/IntakeSettings";
+import { SupportPanel } from "../components/SupportPanel";
+import { TicketQueue } from "../components/TicketQueue";
 import { HealthBadge, ProgressBar, StageBadge } from "../components/ProjectBadges";
 import { StatusManager } from "../components/StatusManager";
 import { Timeline } from "../components/Timeline";
@@ -15,9 +19,9 @@ import { timeAgo } from "../lib/time";
 import { TaskList } from "./TaskList";
 
 type Tab = "overview" | "work" | "settings";
-type View = "list" | "board" | "timeline";
+type View = "list" | "board" | "timeline" | "queue";
 const TABS: [Tab, string][] = [["overview", "Overview"], ["work", "Work"], ["settings", "Settings"]];
-const VIEWS: [View, string][] = [["list", "List"], ["board", "Board"], ["timeline", "Timeline"]];
+const VIEWS: [View, string][] = [["queue", "Queue"], ["list", "List"], ["board", "Board"], ["timeline", "Timeline"]];
 
 export function ProjectPage({ onOpen }: { onOpen: (id: number) => void }) {
   const id = Number(useParams().id);
@@ -51,7 +55,9 @@ export function ProjectPage({ onOpen }: { onOpen: (id: number) => void }) {
   // Managers land on the overview (how is it going?); everyone else on the work (what do I do next?).
   const fallback: Tab = o.access.can_manage ? "overview" : "work";
   const tab = (TABS.find(([t]) => t === params.get("tab"))?.[0] ?? fallback) as Tab;
-  const view = (VIEWS.find(([v]) => v === params.get("view"))?.[0] ?? TYPE_INFO[p.type].view) as View;
+  // The queue is for support desks; everything else offers list, board and timeline.
+  const views = VIEWS.filter(([v]) => v !== "queue" || p.type === "support");
+  const view = (views.find(([v]) => v === params.get("view"))?.[0] ?? TYPE_INFO[p.type].view) as View;
   const go = (next: { tab?: Tab; view?: View }) => {
     const q = new URLSearchParams(params);
     if (next.tab) q.set("tab", next.tab);
@@ -116,22 +122,23 @@ export function ProjectPage({ onOpen }: { onOpen: (id: number) => void }) {
       </div>
 
       {tab === "overview" && <Overview id={id} o={o} refresh={refresh} onOpen={onOpen} />}
-      {tab === "work" && <Work project={p as Project} o={o} view={view} onView={(v) => go({ view: v })} onOpen={onOpen} />}
+      {tab === "work" && <Work project={p as Project} o={o} view={view} views={views} onView={(v) => go({ view: v })} onOpen={onOpen} />}
       {tab === "settings" && <Settings id={id} o={o} refresh={refresh} />}
     </div>
   );
 }
 
-function Work({ project, o, view, onView, onOpen }: { project: Project; o: ProjectOverview; view: View; onView: (v: View) => void; onOpen: (id: number) => void }) {
+function Work({ project, o, view, views, onView, onOpen }: { project: Project; o: ProjectOverview; view: View; views: [View, string][]; onView: (v: View) => void; onOpen: (id: number) => void }) {
   const tasks = useQuery({ queryKey: ["tasks"], queryFn: () => api.tasks() });
   const mine = (tasks.data ?? []).filter((t) => t.project_id === project.id);
   return (
     <div>
       <div className="chip-row" role="group" aria-label="View">
-        {VIEWS.map(([v, label]) => (
+        {views.map(([v, label]) => (
           <button key={v} type="button" className={`chip${view === v ? " on" : ""}`} aria-pressed={view === v} onClick={() => onView(v)}>{label}</button>
         ))}
       </div>
+      {view === "queue" && <TicketQueue project={project} onOpen={onOpen} />}
       {view === "list" && <TaskList view="project" embedded onOpen={onOpen} />}
       {view === "board" && <Board project={project} onOpen={onOpen} />}
       {view === "timeline" && <Timeline project={project} tasks={mine} milestones={o.milestones} onOpen={onOpen} />}
@@ -173,6 +180,9 @@ function Overview({ id, o, refresh, onOpen }: { id: number; o: ProjectOverview; 
 
   return (
     <div>
+      {o.pipeline && <ForecastPanel f={o.pipeline} />}
+      {o.support && <SupportPanel s={o.support} />}
+
       <section className={`panel attention${attentionCount ? " warn" : ""}`} aria-label="Needs attention">
         <h2>
           {attentionCount ? <><AlertTriangle size={16} /> Needs attention</> : "On track"}
@@ -324,13 +334,13 @@ function Settings({ id, o, refresh }: { id: number; o: ProjectOverview; refresh:
   const ws = useQuery({ queryKey: ["workspace", p.workspace_id], queryFn: () => api.workspace(p.workspace_id!), enabled: p.workspace_id !== null });
   const me = useQuery({ queryKey: ["me"], queryFn: api.me }).data;
   const workspaces = useQuery({ queryKey: ["workspaces"], queryFn: api.workspaces });
-  const initial = { name: p.name, color: p.color, type: p.type as ProjectType, description: p.description, lead_id: p.lead_id, start_date: p.start_date ?? "", target_date: p.target_date ?? "" };
+  const initial = { name: p.name, color: p.color, type: p.type as ProjectType, description: p.description, lead_id: p.lead_id, start_date: p.start_date ?? "", target_date: p.target_date ?? "", currency: p.currency, reply_hours: p.first_response_hours === null ? "" : String(p.first_response_hours), resolve_hours: p.resolution_hours === null ? "" : String(p.resolution_hours) };
   const [f, setF] = useState(initial);
   const [saved, setSaved] = useState(false);
-  useEffect(() => setF(initial), [p.name, p.color, p.type, p.description, p.lead_id, p.start_date, p.target_date]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => setF(initial), [p.name, p.color, p.type, p.description, p.lead_id, p.start_date, p.target_date, p.currency, p.first_response_hours, p.resolution_hours]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = useMutation({
-    mutationFn: () => api.updateProject(id, { name: f.name.trim(), color: f.color, type: f.type, description: f.description, lead_id: f.lead_id, start_date: f.start_date || null, target_date: f.target_date || null }),
+    mutationFn: () => api.updateProject(id, { name: f.name.trim(), color: f.color, type: f.type, description: f.description, lead_id: f.lead_id, start_date: f.start_date || null, target_date: f.target_date || null, currency: f.currency.trim().toUpperCase() || "USD", first_response_hours: f.reply_hours ? Number(f.reply_hours) : null, resolution_hours: f.resolve_hours ? Number(f.resolve_hours) : null }),
     onSuccess: () => (setSaved(true), refresh()),
   });
   const canManage = o.access.can_manage;
@@ -373,6 +383,25 @@ function Settings({ id, o, refresh }: { id: number; o: ProjectOverview; refresh:
               <label>Target date<input type="date" value={f.target_date} onChange={(e) => set({ target_date: e.target.value })} /></label>
             </div>
             {badDates && <p className="alert" role="alert">The target date can't be before the start date.</p>}
+            {f.type === "pipeline" && (
+              <label>
+                Currency
+                <input aria-label="Currency" value={f.currency} maxLength={3} placeholder="USD" style={{ width: 90, textTransform: "uppercase" }} onChange={(e) => set({ currency: e.target.value })} />
+                <span className="muted small" style={{ fontWeight: 400 }}>Three letters, such as USD, EUR or AED. Used to show deal values.</span>
+              </label>
+            )}
+            {f.type === "support" && (
+              <div className="two">
+                <label>
+                  Reply to customers within (hours)
+                  <input type="number" min={1} max={8760} aria-label="First reply target hours" value={f.reply_hours} placeholder="No target" onChange={(e) => set({ reply_hours: e.target.value })} />
+                </label>
+                <label>
+                  Resolve within (hours)
+                  <input type="number" min={1} max={8760} aria-label="Resolution target hours" value={f.resolve_hours} placeholder="No target" onChange={(e) => set({ resolve_hours: e.target.value })} />
+                </label>
+              </div>
+            )}
           </fieldset>
           {canManage ? (
             <div className="row-inline">
@@ -388,8 +417,15 @@ function Settings({ id, o, refresh }: { id: number; o: ProjectOverview; refresh:
 
       <section className="panel" aria-label="Task statuses">
         <h2>Task statuses</h2>
-        <StatusManager scope={{ project_id: id }} canManage={canManage} inheritedFrom={wsName ? `the ${wsName} workspace` : undefined} />
+        <StatusManager scope={{ project_id: id }} canManage={canManage} showProbability={p.type === "pipeline"} inheritedFrom={wsName ? `the ${wsName} workspace` : undefined} />
       </section>
+
+      {o.intake && (
+        <section className="panel" aria-label="Customer intake">
+          <h2>Customer intake</h2>
+          <IntakeSettings projectId={id} intake={o.intake} onChanged={() => void refresh()} />
+        </section>
+      )}
     </div>
   );
 }

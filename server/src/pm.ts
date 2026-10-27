@@ -5,6 +5,8 @@ import { inChunks, type DB, type Queryable } from "./db.js";
 import { countWhere, displayName, epoch } from "./dialect.js";
 import { userName } from "./events.js";
 import { HttpError, parseId } from "./http-error.js";
+import { forecast, type Stage as ForecastStage } from "./forecast.js";
+import { minutesBetween, parseStamp, sla } from "./sla.js";
 import { standing, type MilestoneLite, type TaskLite } from "./standing.js";
 import { effectiveStatuses } from "./statuses.js";
 
@@ -184,7 +186,7 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
       await t.run("UPDATE projects SET stage = ? WHERE id = ?", b.stage, pa.id);
       await t.run("INSERT INTO project_updates (project_id, user_id, kind, stage, body) VALUES (?, ?, 'stage', ?, ?)", pa.id, me, b.stage, b.note ?? "");
     });
-    res.json(await db.get("SELECT id, name, color, workspace_id, type, description, stage, lead_id, start_date, target_date FROM projects WHERE id = ?", pa.id));
+    res.json(await db.get("SELECT id, name, color, workspace_id, type, description, stage, lead_id, start_date, target_date, currency, first_response_hours, resolution_hours FROM projects WHERE id = ?", pa.id));
   });
 
   // ---------- health updates ----------
@@ -252,11 +254,13 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
     const me = uid(req);
     const pa = await readable(me, req.params.id);
     const nowIso = new Date().toISOString();
-    const project = (await db.get<Record<string, any>>("SELECT id, name, color, workspace_id, type, description, stage, lead_id, start_date, target_date FROM projects WHERE id = ?", pa.id))!;
+    const { intake_token: intakeToken, ...project } = (await db.get<Record<string, any>>("SELECT id, name, color, workspace_id, type, description, stage, lead_id, start_date, target_date, currency, first_response_hours, resolution_hours, intake_token FROM projects WHERE id = ?", pa.id))!;
     const { milestones, ...stats } = (await standings(db, [project as { id: number; stage: string; start_date: string | null; target_date: string | null }]))(project as { id: number; stage: string; start_date: string | null; target_date: string | null });
 
     const [tasks, assignees, time, updates, statuses, blocked] = await Promise.all([
-      db.all<{ status: string; status_id: number | null }>("SELECT status, status_id FROM tasks WHERE project_id = ? AND parent_id IS NULL", pa.id),
+      db.all<{ status: string; status_id: number | null; value: number | null; due_at: string | null; priority: number; ticket_no: number | null; created_at: string; first_response_at: string | null; completed_at: string | null }>(
+        "SELECT status, status_id, value, due_at, priority, ticket_no, created_at, first_response_at, completed_at FROM tasks WHERE project_id = ? AND parent_id IS NULL", pa.id,
+      ),
       db.all<{ assignee_id: number | null; n: number }>("SELECT assignee_id, COUNT(*) AS n FROM tasks WHERE project_id = ? AND parent_id IS NULL AND status != 'done' GROUP BY assignee_id", pa.id),
       db.get<{ tracked: number; estimate: number }>(
         `SELECT COALESCE((SELECT SUM(${epoch(D, "COALESCE(e.ended_at, ?)")} - ${epoch(D, "e.started_at")}) FROM time_entries e JOIN tasks t ON t.id = e.task_id WHERE t.project_id = ?), 0) AS tracked,
@@ -287,6 +291,44 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
           { id: null, name: "Done", color: "#16a34a", category: "done", count: tasks.filter((t) => t.status === "done").length },
         ];
 
+    // Pipelines get a forecast from their deals' values and each stage's chance of winning.
+    let pipeline: (ReturnType<typeof forecast> & { currency: string }) | null = null;
+    if (project.type === "pipeline") {
+      const stages: ForecastStage[] = statuses.length
+        ? statuses.map((s) => ({ id: s.id, name: s.name, color: s.color, category: s.category, probability: s.probability }))
+        : [
+            { id: null, name: "To do", color: "#64748b", category: "todo", probability: null },
+            { id: null, name: "Doing", color: "#2563eb", category: "doing", probability: null },
+            { id: null, name: "Done", color: "#16a34a", category: "done", probability: null },
+          ];
+      pipeline = { currency: project.currency, ...forecast(tasks, stages) };
+    }
+
+    // Support desks get their queue's health: how many tickets are waiting, and how the service targets are going.
+    let support: Record<string, unknown> | null = null;
+    if (project.type === "support") {
+      const now = new Date();
+      const weekAgo = now.getTime() - 7 * 86_400_000;
+      const tickets = tasks.filter((t) => t.ticket_no !== null);
+      const open = tickets.filter((t) => t.status !== "done");
+      const targets = { first_response_hours: project.first_response_hours as number | null, resolution_hours: project.resolution_hours as number | null };
+      const clocks = open.map((t) => sla(t, targets, now));
+      const avg = (xs: number[]) => (xs.length ? Math.round(xs.reduce((a, b) => a + b, 0) / xs.length) : null);
+      support = {
+        open: open.length,
+        unanswered: open.filter((t) => !t.first_response_at).length,
+        response_breached: clocks.filter((c) => c?.response?.state === "breached").length,
+        resolution_breached: clocks.filter((c) => c?.resolution?.state === "breached").length,
+        at_risk: clocks.filter((c) => c?.response?.state === "at_risk" || c?.resolution?.state === "at_risk").length,
+        avg_first_response_min: avg(tickets.filter((t) => t.first_response_at).map((t) => minutesBetween(t.created_at, t.first_response_at!))),
+        avg_resolution_min: avg(tickets.filter((t) => t.status === "done" && t.completed_at).map((t) => minutesBetween(t.created_at, t.completed_at!))),
+        created_7d: tickets.filter((t) => parseStamp(t.created_at) >= weekAgo).length,
+        resolved_7d: tickets.filter((t) => t.status === "done" && t.completed_at && parseStamp(t.completed_at) >= weekAgo).length,
+        by_priority: [0, 1, 2, 3].map((p) => ({ priority: p, open: open.filter((t) => t.priority === p).length })),
+        targets,
+      };
+    }
+
     const names = new Map<number, string>();
     for (const id of new Set([...updates.map((u) => u.user_id), ...(project.lead_id ? [project.lead_id] : [])])) names.set(id, await userName(db, id));
 
@@ -296,6 +338,9 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
       transitions: TRANSITIONS[pa.stage as Stage],
       progress: { ...stats, tasks_blocked: blocked!.n },
       by_status: byStatus,
+      pipeline,
+      support,
+      intake: project.type === "support" && canEditProject(pa, me) ? { enabled: !!intakeToken, token: (intakeToken as string | null) ?? null } : null,
       workload: assignees.map((a) => ({ assignee_id: a.assignee_id, open: a.n })),
       time: { tracked_min: Math.round((time!.tracked ?? 0) / 60), estimate_min: time!.estimate ?? 0 },
       milestones,
