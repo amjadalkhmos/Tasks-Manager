@@ -16,6 +16,39 @@ export interface StatusRow {
   position: number;
 }
 
+export const PROJECT_TYPES = ["delivery", "pipeline", "initiative", "support"] as const;
+export type ProjectType = (typeof PROJECT_TYPES)[number];
+
+/** The statuses a new project of each type starts with. An initiative uses the built-in To do / Doing / Done. */
+export const TYPE_STATUSES: Record<ProjectType, { name: string; category: Category; color: string }[]> = {
+  delivery: [
+    { name: "To do", category: "todo", color: "#64748b" },
+    { name: "Doing", category: "doing", color: "#2563eb" },
+    { name: "Review", category: "doing", color: "#a855f7" },
+    { name: "Done", category: "done", color: "#16a34a" },
+  ],
+  pipeline: [
+    { name: "New", category: "todo", color: "#64748b" },
+    { name: "Contacted", category: "doing", color: "#2563eb" },
+    { name: "Qualified", category: "doing", color: "#a855f7" },
+    { name: "Won", category: "done", color: "#16a34a" },
+    { name: "Lost", category: "done", color: "#dc2626" },
+  ],
+  initiative: [],
+  support: [
+    { name: "New", category: "todo", color: "#64748b" },
+    { name: "In progress", category: "doing", color: "#2563eb" },
+    { name: "Waiting on customer", category: "doing", color: "#f59e0b" },
+    { name: "Resolved", category: "done", color: "#16a34a" },
+  ],
+};
+
+export async function seedProjectStatuses(q: Queryable, projectId: number, type: ProjectType): Promise<void> {
+  for (const [i, s] of TYPE_STATUSES[type].entries()) {
+    await q.run("INSERT INTO statuses (workspace_id, project_id, name, category, color, position) VALUES (NULL, ?, ?, ?, ?, ?)", projectId, s.name, s.category, s.color, i);
+  }
+}
+
 const COLS = "id, workspace_id, project_id, name, category, color, position";
 
 /** What a scope starts with when its owners choose to customise: the same three steps everyone already has. */

@@ -1,10 +1,11 @@
 import type { Express, Request, RequestHandler } from "express";
 import { z } from "zod";
-import { FORBIDDEN, projectAccess, type ProjectAccess } from "./access.js";
+import { FORBIDDEN, projectAccess, visibleArgs, visibleTasksSql, type ProjectAccess } from "./access.js";
 import { inChunks, type DB, type Queryable } from "./db.js";
-import { countWhere, epoch } from "./dialect.js";
+import { countWhere, displayName, epoch } from "./dialect.js";
 import { userName } from "./events.js";
 import { HttpError, parseId } from "./http-error.js";
+import { standing, type MilestoneLite, type TaskLite } from "./standing.js";
 import { effectiveStatuses } from "./statuses.js";
 
 export const STAGES = ["planning", "active", "on_hold", "completed", "archived"] as const;
@@ -43,50 +44,37 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
   /** Same rule as editing a project: private owner, workspace admins, or the member who made it. */
   const canEditProject = (pa: ProjectAccess, userId: number) => pa.workspaceId === null || pa.canManage || (pa.canWrite && pa.creatorId === userId);
 
-  /** Progress numbers for a set of projects, from top-level tasks only (a subtask is part of its parent's work). */
-  async function progress(q: Queryable, projectIds: number[]) {
-    const nowIso = new Date().toISOString();
-    const [counts, milestones, latest, next] = await Promise.all([
-      inChunks(projectIds, (m, a) =>
-        q.all<{ project_id: number; total: number; done: number; doing: number; overdue: number }>(
-          `SELECT project_id, COUNT(*) AS total, ${countWhere("status = 'done'")} AS done, ${countWhere("status = 'doing'")} AS doing,
-                  ${countWhere("status != 'done' AND due_at IS NOT NULL AND due_at < ?")} AS overdue
-           FROM tasks WHERE parent_id IS NULL AND project_id IN (${m}) GROUP BY project_id`,
-          nowIso, ...a,
+  /** How each project stands (see standing.ts), plus the team's own latest health rating. Top-level tasks only. */
+  async function standings(q: Queryable, projects: { id: number; stage: string; start_date: string | null; target_date: string | null }[]) {
+    const ids = projects.map((p) => p.id);
+    const [tasks, milestones, latest] = await Promise.all([
+      inChunks(ids, (m, a) =>
+        q.all<TaskLite & { project_id: number }>(`SELECT project_id, status, due_at, estimate_min, milestone_id FROM tasks WHERE parent_id IS NULL AND project_id IN (${m})`, ...a),
+      ),
+      inChunks(ids, (m, a) =>
+        q.all<MilestoneLite & { project_id: number; position: number }>(
+          `SELECT id, project_id, name, due_date, completed_at, position FROM milestones WHERE project_id IN (${m}) ORDER BY due_date IS NULL, due_date, position, id`, ...a,
         ),
       ),
-      inChunks(projectIds, (m, a) =>
-        q.all<{ project_id: number; total: number; done: number }>(
-          `SELECT project_id, COUNT(*) AS total, ${countWhere("completed_at IS NOT NULL")} AS done FROM milestones WHERE project_id IN (${m}) GROUP BY project_id`, ...a,
-        ),
-      ),
-      inChunks(projectIds, (m, a) =>
+      inChunks(ids, (m, a) =>
         q.all<{ project_id: number; health: string; created_at: string }>(
           `SELECT u.project_id, u.health, u.created_at FROM project_updates u
            WHERE u.kind = 'update' AND u.project_id IN (${m}) AND u.id = (SELECT MAX(x.id) FROM project_updates x WHERE x.project_id = u.project_id AND x.kind = 'update')`, ...a,
         ),
       ),
-      inChunks(projectIds, (m, a) =>
-        q.all<{ project_id: number; name: string; due_date: string | null }>(
-          `SELECT project_id, name, due_date FROM milestones WHERE completed_at IS NULL AND due_date IS NOT NULL AND project_id IN (${m}) ORDER BY due_date, id`, ...a,
-        ),
-      ),
     ]);
-    const c = new Map(counts.map((r) => [r.project_id, r]));
-    const ms = new Map(milestones.map((r) => [r.project_id, r]));
+    const byProject = <T extends { project_id: number }>(rows: T[]) => {
+      const m = new Map<number, T[]>();
+      for (const r of rows) m.set(r.project_id, [...(m.get(r.project_id) ?? []), r]);
+      return m;
+    };
+    const t = byProject(tasks);
+    const ms = byProject(milestones);
     const l = new Map(latest.map((r) => [r.project_id, r]));
-    const nextMs = new Map<number, { name: string; due_date: string | null }>();
-    for (const n of next) if (!nextMs.has(n.project_id)) nextMs.set(n.project_id, n);
-    return (id: number) => ({
-      tasks_total: c.get(id)?.total ?? 0,
-      tasks_done: c.get(id)?.done ?? 0,
-      tasks_doing: c.get(id)?.doing ?? 0,
-      tasks_overdue: c.get(id)?.overdue ?? 0,
-      milestones_total: ms.get(id)?.total ?? 0,
-      milestones_done: ms.get(id)?.done ?? 0,
-      next_milestone: nextMs.get(id) ?? null,
-      health: (l.get(id)?.health ?? null) as (typeof HEALTH)[number] | null,
-      last_update_at: l.get(id)?.created_at ?? null,
+    return (p: { id: number; stage: string; start_date: string | null; target_date: string | null }) => ({
+      ...standing(p, t.get(p.id) ?? [], ms.get(p.id) ?? []),
+      health: (l.get(p.id)?.health ?? null) as (typeof HEALTH)[number] | null,
+      last_update_at: l.get(p.id)?.created_at ?? null,
     });
   }
 
@@ -94,15 +82,87 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
   app.get("/api/portfolio", auth, async (req, res) => {
     const me = uid(req);
     const projects = await db.all<{
-      id: number; name: string; color: string; workspace_id: number | null; description: string; stage: Stage; lead_id: number | null; start_date: string | null; target_date: string | null;
+      id: number; name: string; color: string; workspace_id: number | null; type: string; description: string; stage: Stage; lead_id: number | null; start_date: string | null; target_date: string | null;
     }>(
-      `SELECT p.id, p.name, p.color, p.workspace_id, p.description, p.stage, p.lead_id, p.start_date, p.target_date FROM projects p
+      `SELECT p.id, p.name, p.color, p.workspace_id, p.type, p.description, p.stage, p.lead_id, p.start_date, p.target_date FROM projects p
        WHERE (p.workspace_id IS NULL AND p.user_id = ?) OR p.workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id = ?)
        ORDER BY p.name, p.id`,
       me, me,
     );
-    const stats = await progress(db, projects.map((p) => p.id));
-    res.json(projects.map((p) => ({ ...p, ...stats(p.id) })));
+    const stats = await standings(db, projects);
+    res.json(projects.map((p) => {
+      const { milestones: _detail, ...summary } = stats(p);
+      return { ...p, ...summary };
+    }));
+  });
+
+  // ---------- what needs attention ----------
+  const SHOWN = 50;
+  /**
+   * One page for "what should I look at": projects drifting off plan, overdue and blocked work, and (for people who
+   * manage a workspace) unassigned work and who is carrying how much. Everyone sees their own work; admins and owners
+   * also see everything in the workspaces they manage.
+   */
+  app.get("/api/attention", auth, async (req, res) => {
+    const me = uid(req);
+    const nowIso = new Date().toISOString();
+    const managed = (await db.all<{ workspace_id: number }>("SELECT workspace_id FROM workspace_members WHERE user_id = ? AND role IN ('owner','admin')", me)).map((r) => r.workspace_id);
+    const mine = `${visibleTasksSql("t")} AND (t.assignee_id = ? OR (t.assignee_id IS NULL AND t.user_id = ?)
+       OR p.workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id = ? AND role IN ('owner','admin')))`;
+    const mineArgs = [...visibleArgs(me), me, me, me];
+    const live = "(p.id IS NULL OR p.stage NOT IN ('archived','completed'))";
+    const cols = "t.id, t.title, t.project_id, t.due_at, t.assignee_id, t.status, p.name AS project_name, p.workspace_id";
+    const list = async (extra: string, args: unknown[], order: string) => {
+      const base = `FROM tasks t LEFT JOIN projects p ON p.id = t.project_id WHERE ${mine} AND t.status != 'done' AND ${live} AND ${extra}`;
+      const [items, total] = await Promise.all([
+        db.all(`SELECT ${cols} ${base} ORDER BY ${order} LIMIT ${SHOWN}`, ...mineArgs, ...args),
+        db.get<{ n: number }>(`SELECT COUNT(*) AS n ${base}`, ...mineArgs, ...args),
+      ]);
+      return { total: total!.n, items };
+    };
+
+    const [overdue, blocked] = await Promise.all([
+      list("t.due_at IS NOT NULL AND t.due_at < ?", [nowIso], "t.due_at, t.id"),
+      list("EXISTS (SELECT 1 FROM task_deps d JOIN tasks b ON b.id = d.blocked_by_id WHERE d.task_id = t.id AND b.status != 'done')", [], "t.id"),
+    ]);
+
+    let unassigned: Awaited<ReturnType<typeof list>> = { total: 0, items: [] };
+    let workload: { workspace_id: number; assignee_id: number | null; name: string | null; open: number; overdue: number }[] = [];
+    if (managed.length) {
+      const m = managed.map(() => "?").join(",");
+      const base = `FROM tasks t JOIN projects p ON p.id = t.project_id WHERE p.workspace_id IN (${m}) AND t.parent_id IS NULL AND t.status != 'done' AND p.stage NOT IN ('archived','completed')`;
+      const [items, total, load] = await Promise.all([
+        db.all(`SELECT ${cols} ${base} AND t.assignee_id IS NULL ORDER BY t.due_at IS NULL, t.due_at, t.id LIMIT ${SHOWN}`, ...managed),
+        db.get<{ n: number }>(`SELECT COUNT(*) AS n ${base} AND t.assignee_id IS NULL`, ...managed),
+        db.all<{ workspace_id: number; assignee_id: number | null; open: number; overdue: number }>(
+          `SELECT p.workspace_id, t.assignee_id, COUNT(*) AS open, ${countWhere("t.due_at IS NOT NULL AND t.due_at < ?")} AS overdue ${base} GROUP BY p.workspace_id, t.assignee_id`,
+          nowIso, ...managed,
+        ),
+      ]);
+      unassigned = { total: total!.n, items };
+      const ids = [...new Set(load.map((r) => r.assignee_id).filter((x): x is number => x !== null))];
+      const names = new Map((await inChunks(ids, (mk, a) => db.all<{ id: number; name: string }>(`SELECT u.id, ${displayName(D, "u")} AS name FROM users u WHERE u.id IN (${mk})`, ...a))).map((r) => [r.id, r.name]));
+      workload = load
+        .map((r) => ({ ...r, name: r.assignee_id === null ? null : (names.get(r.assignee_id) ?? "A former member") }))
+        .sort((a, b) => b.open - a.open);
+    }
+
+    // Projects that are active and either rated at risk by the team or flagged by the numbers.
+    const projects = await db.all<{ id: number; name: string; color: string; workspace_id: number | null; stage: string; start_date: string | null; target_date: string | null }>(
+      `SELECT p.id, p.name, p.color, p.workspace_id, p.stage, p.start_date, p.target_date FROM projects p
+       WHERE p.stage = 'active' AND ((p.workspace_id IS NULL AND p.user_id = ?) OR p.workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id = ?))`,
+      me, me,
+    );
+    const stats = await standings(db, projects);
+    const flagged = projects
+      .map((p) => {
+        const { milestones: _m, ...s } = stats(p);
+        return { ...p, ...s };
+      })
+      .filter((p) => p.signals.length > 0 || p.health === "at_risk" || p.health === "off_track")
+      .sort((a, b) => Number(b.health === "off_track" || b.suggested_health === "off_track") - Number(a.health === "off_track" || a.suggested_health === "off_track") || b.signals.length - a.signals.length);
+
+    res.json({ is_manager: managed.length > 0, projects: flagged, overdue, blocked, unassigned, workload });
   });
 
   // ---------- life cycle ----------
@@ -124,7 +184,7 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
       await t.run("UPDATE projects SET stage = ? WHERE id = ?", b.stage, pa.id);
       await t.run("INSERT INTO project_updates (project_id, user_id, kind, stage, body) VALUES (?, ?, 'stage', ?, ?)", pa.id, me, b.stage, b.note ?? "");
     });
-    res.json(await db.get("SELECT id, name, color, workspace_id, description, stage, lead_id, start_date, target_date FROM projects WHERE id = ?", pa.id));
+    res.json(await db.get("SELECT id, name, color, workspace_id, type, description, stage, lead_id, start_date, target_date FROM projects WHERE id = ?", pa.id));
   });
 
   // ---------- health updates ----------
@@ -192,10 +252,10 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
     const me = uid(req);
     const pa = await readable(me, req.params.id);
     const nowIso = new Date().toISOString();
-    const project = (await db.get<Record<string, any>>("SELECT id, name, color, workspace_id, description, stage, lead_id, start_date, target_date FROM projects WHERE id = ?", pa.id))!;
-    const stats = (await progress(db, [pa.id]))(pa.id);
+    const project = (await db.get<Record<string, any>>("SELECT id, name, color, workspace_id, type, description, stage, lead_id, start_date, target_date FROM projects WHERE id = ?", pa.id))!;
+    const { milestones, ...stats } = (await standings(db, [project as { id: number; stage: string; start_date: string | null; target_date: string | null }]))(project as { id: number; stage: string; start_date: string | null; target_date: string | null });
 
-    const [tasks, assignees, time, milestones, updates, statuses, blocked] = await Promise.all([
+    const [tasks, assignees, time, updates, statuses, blocked] = await Promise.all([
       db.all<{ status: string; status_id: number | null }>("SELECT status, status_id FROM tasks WHERE project_id = ? AND parent_id IS NULL", pa.id),
       db.all<{ assignee_id: number | null; n: number }>("SELECT assignee_id, COUNT(*) AS n FROM tasks WHERE project_id = ? AND parent_id IS NULL AND status != 'done' GROUP BY assignee_id", pa.id),
       db.get<{ tracked: number; estimate: number }>(
@@ -203,7 +263,6 @@ export function registerProjectManagement(app: Express, { db, auth, uid }: Deps)
                 COALESCE((SELECT SUM(estimate_min) FROM tasks WHERE project_id = ? AND parent_id IS NULL), 0) AS estimate`,
         nowIso, pa.id, pa.id,
       ),
-      db.all("SELECT id, project_id, name, due_date, completed_at, position FROM milestones WHERE project_id = ? ORDER BY due_date IS NULL, due_date, position, id", pa.id),
       db.all<{ id: number; user_id: number; kind: string; stage: string | null; health: string | null; body: string; created_at: string }>(
         "SELECT id, user_id, kind, stage, health, body, created_at FROM project_updates WHERE project_id = ? ORDER BY id DESC LIMIT 30", pa.id,
       ),

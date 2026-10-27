@@ -1,24 +1,27 @@
 import { useEffect, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Trash2, X } from "lucide-react";
-import { api, type Health, type ProjectOverview, type Stage } from "../api";
+import { AlertTriangle, Trash2, X } from "lucide-react";
+import { api, type Health, type Project, type ProjectOverview, type ProjectType, type Stage, type Task } from "../api";
+import { Board } from "../components/Board";
 import { HealthBadge, ProgressBar, StageBadge } from "../components/ProjectBadges";
 import { StatusManager } from "../components/StatusManager";
-import { describeDeadline, formatDay, percent, transitionLabel } from "../lib/projects";
+import { Timeline } from "../components/Timeline";
+import { HEALTH_LABEL, STAGE_LABEL, describeDeadline, formatDay, percent, transitionLabel } from "../lib/projects";
+import { PROJECT_TYPES, TYPE_INFO } from "../lib/projectTypes";
 import { usePeople } from "../lib/people";
 import { formatMinutes } from "../lib/tasks";
 import { timeAgo } from "../lib/time";
-import { HEALTH_LABEL, STAGE_LABEL } from "../lib/projects";
 import { TaskList } from "./TaskList";
 
-type Tab = "tasks" | "overview" | "settings";
-const TABS: [Tab, string][] = [["tasks", "Tasks"], ["overview", "Overview"], ["settings", "Settings"]];
+type Tab = "overview" | "work" | "settings";
+type View = "list" | "board" | "timeline";
+const TABS: [Tab, string][] = [["overview", "Overview"], ["work", "Work"], ["settings", "Settings"]];
+const VIEWS: [View, string][] = [["list", "List"], ["board", "Board"], ["timeline", "Timeline"]];
 
 export function ProjectPage({ onOpen }: { onOpen: (id: number) => void }) {
   const id = Number(useParams().id);
   const [params, setParams] = useSearchParams();
-  const tab = (TABS.find(([t]) => t === params.get("tab"))?.[0] ?? "tasks") as Tab;
   const qc = useQueryClient();
   const overview = useQuery({ queryKey: ["overview", id], queryFn: () => api.overview(id), retry: false });
   const [moving, setMoving] = useState<Stage | null>(null);
@@ -44,7 +47,17 @@ export function ProjectPage({ onOpen }: { onOpen: (id: number) => void }) {
   const p = o.project;
   const openTasks = o.progress.tasks_total - o.progress.tasks_done;
   const deadline = p.stage === "completed" || p.stage === "archived" ? null : describeDeadline(p.target_date);
-  const setTab = (t: Tab) => setParams(t === "tasks" ? {} : { tab: t }, { replace: true });
+
+  // Managers land on the overview (how is it going?); everyone else on the work (what do I do next?).
+  const fallback: Tab = o.access.can_manage ? "overview" : "work";
+  const tab = (TABS.find(([t]) => t === params.get("tab"))?.[0] ?? fallback) as Tab;
+  const view = (VIEWS.find(([v]) => v === params.get("view"))?.[0] ?? TYPE_INFO[p.type].view) as View;
+  const go = (next: { tab?: Tab; view?: View }) => {
+    const q = new URLSearchParams(params);
+    if (next.tab) q.set("tab", next.tab);
+    if (next.view) q.set("view", next.view);
+    setParams(q, { replace: true });
+  };
 
   return (
     <div>
@@ -65,6 +78,7 @@ export function ProjectPage({ onOpen }: { onOpen: (id: number) => void }) {
         </div>
         {p.description && <p className="desc">{p.description}</p>}
         <div className="facts">
+          <span>{TYPE_INFO[p.type].label}</span>
           {p.lead_name && <span>Lead: {p.lead_name}</span>}
           {(p.start_date || p.target_date) && <span>{formatDay(p.start_date)} → {formatDay(p.target_date)}</span>}
           {deadline && <span className={deadline.late ? "late-text" : ""}>{deadline.text}</span>}
@@ -97,22 +111,40 @@ export function ProjectPage({ onOpen }: { onOpen: (id: number) => void }) {
 
       <div className="tabbar" role="tablist">
         {TABS.map(([t, label]) => (
-          <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)}>{label}</button>
+          <button key={t} role="tab" aria-selected={tab === t} onClick={() => go({ tab: t })}>{label}</button>
         ))}
       </div>
 
-      {tab === "tasks" && <TaskList view="project" embedded onOpen={onOpen} />}
-      {tab === "overview" && <Overview id={id} o={o} refresh={refresh} />}
+      {tab === "overview" && <Overview id={id} o={o} refresh={refresh} onOpen={onOpen} />}
+      {tab === "work" && <Work project={p as Project} o={o} view={view} onView={(v) => go({ view: v })} onOpen={onOpen} />}
       {tab === "settings" && <Settings id={id} o={o} refresh={refresh} />}
     </div>
   );
 }
 
-function Overview({ id, o, refresh }: { id: number; o: ProjectOverview; refresh: () => Promise<unknown> }) {
+function Work({ project, o, view, onView, onOpen }: { project: Project; o: ProjectOverview; view: View; onView: (v: View) => void; onOpen: (id: number) => void }) {
+  const tasks = useQuery({ queryKey: ["tasks"], queryFn: () => api.tasks() });
+  const mine = (tasks.data ?? []).filter((t) => t.project_id === project.id);
+  return (
+    <div>
+      <div className="chip-row" role="group" aria-label="View">
+        {VIEWS.map(([v, label]) => (
+          <button key={v} type="button" className={`chip${view === v ? " on" : ""}`} aria-pressed={view === v} onClick={() => onView(v)}>{label}</button>
+        ))}
+      </div>
+      {view === "list" && <TaskList view="project" embedded onOpen={onOpen} />}
+      {view === "board" && <Board project={project} onOpen={onOpen} />}
+      {view === "timeline" && <Timeline project={project} tasks={mine} milestones={o.milestones} onOpen={onOpen} />}
+    </div>
+  );
+}
+
+function Overview({ id, o, refresh, onOpen }: { id: number; o: ProjectOverview; refresh: () => Promise<unknown>; onOpen: (id: number) => void }) {
   const { nameOf } = usePeople();
   const g = o.progress;
   const open = g.tasks_total - g.tasks_done;
   const canWrite = o.access.can_write;
+  const tasksQ = useQuery({ queryKey: ["tasks"], queryFn: () => api.tasks() });
   const [msName, setMsName] = useState("");
   const [msDue, setMsDue] = useState("");
   const [health, setHealth] = useState<Health>("on_track");
@@ -127,13 +159,59 @@ function Overview({ id, o, refresh }: { id: number; o: ProjectOverview; refresh:
   const today = new Date().toISOString().slice(0, 10);
   const maxWork = Math.max(1, ...o.workload.map((w) => w.open));
 
+  // What to look at first: the numbers' warnings, then the work behind them.
+  const nowIso = new Date().toISOString();
+  const projectTasks = (tasksQ.data ?? []).filter((t) => t.project_id === id && t.parent_id === null && t.status !== "done");
+  const overdue = projectTasks.filter((t) => t.due_at && t.due_at < nowIso).sort((a, b) => a.due_at!.localeCompare(b.due_at!));
+  const blocked = projectTasks.filter((t) => t.blocked);
+  const unassigned = o.project.workspace_id !== null && o.access.can_manage ? projectTasks.filter((t) => t.assignee_id === null) : [];
+  const attentionCount = g.signals.length + (blocked.length ? 1 : 0) + (unassigned.length ? 1 : 0);
+  const TaskLink = ({ t }: { t: Task }) => (
+    <li><button type="button" className="link" onClick={() => onOpen(t.id)}>{t.title}</button>{t.due_at && <span className="muted small"> · due {new Date(t.due_at).toLocaleDateString()}</span>}</li>
+  );
+  const differs = g.suggested_health && g.health && g.suggested_health !== g.health;
+
   return (
     <div>
+      <section className={`panel attention${attentionCount ? " warn" : ""}`} aria-label="Needs attention">
+        <h2>
+          {attentionCount ? <><AlertTriangle size={16} /> Needs attention</> : "On track"}
+          {g.suggested_health && <HealthBadge health={g.suggested_health} />}
+        </h2>
+        {attentionCount === 0 && <p className="muted small">Nothing is overdue, blocked or running behind. The numbers see no problems.</p>}
+        {g.signals.length > 0 && <ul className="signals">{g.signals.map((s) => <li key={s.code}>{s.text}</li>)}</ul>}
+        {differs && (
+          <p className="muted small">
+            The team rated it <strong>{HEALTH_LABEL[g.health!]}</strong>, while the numbers suggest <strong>{HEALTH_LABEL[g.suggested_health!]}</strong>. Post an update to say why, or to change the rating.
+          </p>
+        )}
+        {overdue.length > 0 && (
+          <>
+            <h3>Overdue</h3>
+            <ul className="attention-list">{overdue.slice(0, 5).map((t) => <TaskLink key={t.id} t={t} />)}</ul>
+            {overdue.length > 5 && <p className="muted small">and {overdue.length - 5} more</p>}
+          </>
+        )}
+        {blocked.length > 0 && (
+          <>
+            <h3>Blocked by unfinished work</h3>
+            <ul className="attention-list">{blocked.slice(0, 5).map((t) => <TaskLink key={t.id} t={t} />)}</ul>
+          </>
+        )}
+        {unassigned.length > 0 && (
+          <>
+            <h3>Nobody is assigned</h3>
+            <ul className="attention-list">{unassigned.slice(0, 5).map((t) => <TaskLink key={t.id} t={t} />)}</ul>
+            {unassigned.length > 5 && <p className="muted small">and {unassigned.length - 5} more</p>}
+          </>
+        )}
+      </section>
+
       <div className="pm-stats">
         <div className="stat">
-          <span>Progress</span>
-          <strong>{percent(g.tasks_done, g.tasks_total)}%<small> · {g.tasks_done}/{g.tasks_total}</small></strong>
-          <ProgressBar done={g.tasks_done} total={g.tasks_total} label="Tasks done" />
+          <span title="Done work as a share of all work. Tasks are weighted by their estimate; one without an estimate counts as an hour.">Progress</span>
+          <strong>{g.progress_pct}%<small> · {g.tasks_done}/{g.tasks_total} tasks</small></strong>
+          <ProgressBar done={g.progress_pct} total={100} label="Work done" />
         </div>
         <div className="stat"><span>Open</span><strong>{open}</strong></div>
         <div className="stat"><span>Overdue</span><strong className={g.tasks_overdue ? "overdue" : ""}>{g.tasks_overdue}</strong></div>
@@ -142,10 +220,43 @@ function Overview({ id, o, refresh }: { id: number; o: ProjectOverview; refresh:
           <strong>{formatMinutes(o.time.tracked_min)}<small>{o.time.estimate_min ? ` / ${formatMinutes(o.time.estimate_min)} est.` : ""}</small></strong>
         </div>
       </div>
-      {g.tasks_blocked > 0 && <p className="muted small" style={{ marginBottom: 12 }}>{g.tasks_blocked} open task{g.tasks_blocked === 1 ? " is" : "s are"} blocked by unfinished work.</p>}
       {error && <p className="alert" role="alert">{error}</p>}
 
       <div className="pm-grid">
+        <section className="panel span-2" aria-label="Milestones">
+          <h2>Milestones {g.milestones_total > 0 && <span className="muted small">{g.milestones_done}/{g.milestones_total} done</span>}</h2>
+          {o.milestones.length === 0 && <p className="muted small">No milestones yet. Add the dates that matter, then put tasks in them from the task panel.</p>}
+          <ul className="milestones">
+            {o.milestones.map((m) => (
+              <li key={m.id} className={m.completed_at ? "done" : ""}>
+                <input type="checkbox" checked={!!m.completed_at} disabled={!canWrite} aria-label={`Done: ${m.name}`} onChange={() => toggleMs.mutate({ mid: m.id, done: !m.completed_at })} />
+                <span className="name">
+                  {m.name}
+                  {m.tasks_total > 0 && (
+                    <span className="ms-progress">
+                      <ProgressBar done={m.tasks_done} total={m.tasks_total} label={`${m.name} progress`} />
+                      <span className="muted small">{m.tasks_done}/{m.tasks_total} tasks</span>
+                    </span>
+                  )}
+                </span>
+                {!m.completed_at && m.overdue && <span className="pbadge health-off_track">Overdue</span>}
+                {!m.completed_at && !m.overdue && m.tasks_late > 0 && <span className="pbadge health-at_risk" title="Open tasks are overdue or due after this date">Slipping</span>}
+                {m.due_date && <span className={`muted small${!m.completed_at && m.due_date < today ? " late" : ""}`}>{formatDay(m.due_date)}</span>}
+                {canWrite && (
+                  <button type="button" className="icon sm" aria-label={`Remove ${m.name}`} onClick={() => delMs.mutate(m.id)}><X size={14} /></button>
+                )}
+              </li>
+            ))}
+          </ul>
+          {canWrite && (
+            <form className="add-line" onSubmit={(e) => (e.preventDefault(), msName.trim() && addMs.mutate())}>
+              <input aria-label="New milestone" placeholder="Add a milestone…" value={msName} maxLength={200} onChange={(e) => setMsName(e.target.value)} />
+              <input type="date" aria-label="Milestone date" value={msDue} onChange={(e) => setMsDue(e.target.value)} />
+              <button type="submit" className="secondary" disabled={!msName.trim() || addMs.isPending}>Add</button>
+            </form>
+          )}
+        </section>
+
         <section className="panel" aria-label="Tasks by status">
           <h2>By status</h2>
           <ul className="bar-list">
@@ -173,35 +284,11 @@ function Overview({ id, o, refresh }: { id: number; o: ProjectOverview; refresh:
           </ul>
         </section>
 
-        <section className="panel" aria-label="Milestones">
-          <h2>Milestones {g.milestones_total > 0 && <span className="muted small">{g.milestones_done}/{g.milestones_total}</span>}</h2>
-          {o.milestones.length === 0 && <p className="muted small">No milestones yet. Add the dates that matter.</p>}
-          <ul className="milestones">
-            {o.milestones.map((m) => (
-              <li key={m.id} className={m.completed_at ? "done" : ""}>
-                <input type="checkbox" checked={!!m.completed_at} disabled={!canWrite} aria-label={`Done: ${m.name}`} onChange={() => toggleMs.mutate({ mid: m.id, done: !m.completed_at })} />
-                <span className="name">{m.name}</span>
-                {m.due_date && <span className={`muted small${!m.completed_at && m.due_date < today ? " late" : ""}`}>{formatDay(m.due_date)}</span>}
-                {canWrite && (
-                  <button type="button" className="icon sm" aria-label={`Remove ${m.name}`} onClick={() => delMs.mutate(m.id)}><X size={14} /></button>
-                )}
-              </li>
-            ))}
-          </ul>
-          {canWrite && (
-            <form className="add-line" onSubmit={(e) => (e.preventDefault(), msName.trim() && addMs.mutate())}>
-              <input aria-label="New milestone" placeholder="Add a milestone…" value={msName} maxLength={200} onChange={(e) => setMsName(e.target.value)} />
-              <input type="date" aria-label="Milestone date" value={msDue} onChange={(e) => setMsDue(e.target.value)} />
-              <button type="submit" className="secondary" disabled={!msName.trim() || addMs.isPending}>Add</button>
-            </form>
-          )}
-        </section>
-
-        <section className="panel" aria-label="Status updates">
+        <section className="panel span-2" aria-label="Status updates">
           <h2>Updates</h2>
           {canWrite && (
             <form onSubmit={(e) => (e.preventDefault(), post.mutate())} style={{ display: "grid", gap: 8 }}>
-              <div className="chip-row" role="radiogroup" aria-label="Health">
+              <div className="chip-row" role="radiogroup" aria-label="Health" style={{ marginBottom: 0 }}>
                 {(Object.keys(HEALTH_LABEL) as Health[]).map((h) => (
                   <button key={h} type="button" role="radio" aria-checked={health === h} className={`chip${health === h ? " on" : ""}`} onClick={() => setHealth(h)}>
                     {HEALTH_LABEL[h]}
@@ -237,12 +324,13 @@ function Settings({ id, o, refresh }: { id: number; o: ProjectOverview; refresh:
   const ws = useQuery({ queryKey: ["workspace", p.workspace_id], queryFn: () => api.workspace(p.workspace_id!), enabled: p.workspace_id !== null });
   const me = useQuery({ queryKey: ["me"], queryFn: api.me }).data;
   const workspaces = useQuery({ queryKey: ["workspaces"], queryFn: api.workspaces });
-  const [f, setF] = useState({ name: p.name, color: p.color, description: p.description, lead_id: p.lead_id, start_date: p.start_date ?? "", target_date: p.target_date ?? "" });
+  const initial = { name: p.name, color: p.color, type: p.type as ProjectType, description: p.description, lead_id: p.lead_id, start_date: p.start_date ?? "", target_date: p.target_date ?? "" };
+  const [f, setF] = useState(initial);
   const [saved, setSaved] = useState(false);
-  useEffect(() => setF({ name: p.name, color: p.color, description: p.description, lead_id: p.lead_id, start_date: p.start_date ?? "", target_date: p.target_date ?? "" }), [p.name, p.color, p.description, p.lead_id, p.start_date, p.target_date]);
+  useEffect(() => setF(initial), [p.name, p.color, p.type, p.description, p.lead_id, p.start_date, p.target_date]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = useMutation({
-    mutationFn: () => api.updateProject(id, { name: f.name.trim(), color: f.color, description: f.description, lead_id: f.lead_id, start_date: f.start_date || null, target_date: f.target_date || null }),
+    mutationFn: () => api.updateProject(id, { name: f.name.trim(), color: f.color, type: f.type, description: f.description, lead_id: f.lead_id, start_date: f.start_date || null, target_date: f.target_date || null }),
     onSuccess: () => (setSaved(true), refresh()),
   });
   const canManage = o.access.can_manage;
@@ -261,6 +349,15 @@ function Settings({ id, o, refresh }: { id: number; o: ProjectOverview; refresh:
               <label>Name<input value={f.name} maxLength={100} onChange={(e) => set({ name: e.target.value })} /></label>
               <label>Colour<input type="color" value={f.color} onChange={(e) => set({ color: e.target.value })} /></label>
             </div>
+            <label>
+              Type
+              <select value={f.type} onChange={(e) => set({ type: e.target.value as ProjectType })}>
+                {PROJECT_TYPES.map((t) => (
+                  <option key={t} value={t}>{TYPE_INFO[t].label}</option>
+                ))}
+              </select>
+              <span className="muted small" style={{ fontWeight: 400 }}>{TYPE_INFO[f.type].blurb} The type sets the view the Work tab opens on; change statuses below.</span>
+            </label>
             <label>Description<textarea rows={3} value={f.description} maxLength={5000} placeholder="What is this project for?" onChange={(e) => set({ description: e.target.value })} /></label>
             <label>
               Project lead

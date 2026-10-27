@@ -28,6 +28,9 @@ export interface Task {
   status: "todo" | "doing" | "done";
   /** The custom status (see Status), or null for the built-in one of this category. */
   status_id: number | null;
+  /** When work is planned to begin (ISO); with due_at it gives the task a span on the timeline. */
+  start_at: string | null;
+  milestone_id: number | null;
   due_at: string | null;
   remind_at: string | null;
   recurrence: Recurrence | null;
@@ -118,6 +121,7 @@ export interface Status {
   position: number;
 }
 
+export type ProjectType = "delivery" | "pipeline" | "initiative" | "support";
 export type Stage = "planning" | "active" | "on_hold" | "completed" | "archived";
 export type Health = "on_track" | "at_risk" | "off_track";
 
@@ -127,6 +131,7 @@ export interface Project {
   color: string;
   /** null for private projects. */
   workspace_id: number | null;
+  type: ProjectType;
   description: string;
   stage: Stage;
   lead_id: number | null;
@@ -144,16 +149,72 @@ export interface Milestone {
   position: number;
 }
 
+export interface Signal {
+  code: string;
+  text: string;
+}
+
 export interface PortfolioRow extends Project {
   tasks_total: number;
   tasks_done: number;
   tasks_doing: number;
   tasks_overdue: number;
+  /** Done work as a share of all work, weighted by estimate. 0 to 100. */
+  progress_pct: number;
   milestones_total: number;
   milestones_done: number;
   next_milestone: { name: string; due_date: string | null } | null;
+  /** The team's own latest rating. */
   health: Health | null;
+  /** What the numbers suggest (active projects only). */
+  suggested_health: Health | null;
+  signals: Signal[];
   last_update_at: string | null;
+}
+
+export interface MilestoneProgress extends Milestone {
+  tasks_total: number;
+  tasks_done: number;
+  tasks_late: number;
+  overdue: boolean;
+}
+
+export interface AttentionTask {
+  id: number;
+  title: string;
+  project_id: number | null;
+  project_name: string | null;
+  workspace_id: number | null;
+  due_at: string | null;
+  assignee_id: number | null;
+  status: string;
+}
+
+export interface AttentionList {
+  total: number;
+  items: AttentionTask[];
+}
+
+export interface AttentionProject {
+  id: number;
+  name: string;
+  color: string;
+  workspace_id: number | null;
+  stage: Stage;
+  target_date: string | null;
+  progress_pct: number;
+  health: Health | null;
+  suggested_health: Health | null;
+  signals: Signal[];
+}
+
+export interface Attention {
+  is_manager: boolean;
+  projects: AttentionProject[];
+  overdue: AttentionList;
+  blocked: AttentionList;
+  unassigned: AttentionList;
+  workload: { workspace_id: number; assignee_id: number | null; name: string | null; open: number; overdue: number }[];
 }
 
 export interface ProjectUpdate {
@@ -175,7 +236,7 @@ export interface ProjectOverview {
   by_status: { id: number | null; name: string; color: string; category: Category; count: number }[];
   workload: { assignee_id: number | null; open: number }[];
   time: { tracked_min: number; estimate_min: number };
-  milestones: Milestone[];
+  milestones: MilestoneProgress[];
   updates: ProjectUpdate[];
 }
 
@@ -354,10 +415,11 @@ export const api = {
     request<{ completed: Task; next: Task | null }>("POST", `/tasks/${id}/complete`, statusId === undefined ? undefined : { status_id: statusId }),
 
   projects: () => request<Project[]>("GET", "/projects"),
-  createProject: (name: string, workspaceId?: number) =>
-    request<Project>("POST", "/projects", { name, ...(workspaceId ? { workspace_id: workspaceId } : {}) }),
+  createProject: (name: string, workspaceId?: number, extra: Partial<Pick<Project, "type" | "color" | "description" | "lead_id" | "start_date" | "target_date">> = {}) =>
+    request<Project>("POST", "/projects", { name, ...(workspaceId ? { workspace_id: workspaceId } : {}), ...extra }),
+  attention: () => request<Attention>("GET", "/attention"),
   renameProject: (id: number, name: string) => request<Project>("PATCH", `/projects/${id}`, { name }),
-  updateProject: (id: number, p: Partial<Pick<Project, "name" | "color" | "description" | "lead_id" | "start_date" | "target_date">>) =>
+  updateProject: (id: number, p: Partial<Pick<Project, "name" | "color" | "type" | "description" | "lead_id" | "start_date" | "target_date">>) =>
     request<Project>("PATCH", `/projects/${id}`, p),
   setStage: (id: number, stage: Stage, note?: string, force?: boolean) => request<Project>("POST", `/projects/${id}/stage`, { stage, note, force }),
   portfolio: () => request<PortfolioRow[]>("GET", "/portfolio"),

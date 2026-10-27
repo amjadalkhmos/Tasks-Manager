@@ -12,11 +12,13 @@ interface Props {
   onToggle: (t: Task) => void;
   /** Show a "subtask" marker before the title (used when subtasks appear in flat lists). */
   nested?: boolean;
+  /** Where the task lives, for lists that mix projects. */
+  project?: string;
 }
 
 const ICON = 13;
 
-export function TaskRow({ task: t, onOpen, onToggle, nested }: Props) {
+export function TaskRow({ task: t, onOpen, onToggle, nested, project }: Props) {
   const due = dueState(t);
   const { nameOf } = usePeople();
   const status = useStatuses().of(t);
@@ -33,6 +35,7 @@ export function TaskRow({ task: t, onOpen, onToggle, nested }: Props) {
       <button className="title" onClick={() => onOpen(t.id)}>
         {nested && <CornerDownRight size={ICON} className="indent" aria-label="Subtask" />}
         {t.title}
+        {project && <span className="proj-label">{project}</span>}
       </button>
       <span className="meta">
         <StatusChip status={status} />

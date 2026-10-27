@@ -739,7 +739,10 @@ fieldset.bare { border: 0; margin: 0; padding: 0; min-width: 0; }
 .portfolio-table .name .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .late-text { color: var(--danger); font-weight: 600; }
 @media (max-width: 760px) {
-  .pm-grid { grid-template-columns: 1fr; }
+  .pm-grid { grid-template-columns: minmax(0, 1fr); }
+  .add-line { flex-wrap: wrap; }
+  .add-line input { min-width: 0; flex: 1 1 140px; }
+  .milestones .ms-progress { grid-template-columns: minmax(0, 1fr) auto; }
   .pm-stats { grid-template-columns: 1fr 1fr; }
   .pm-stats .stat:nth-child(3) { border-left: 0; }
   .pm-stats .stat:nth-child(n+3) { border-top: 1px solid var(--border); }
@@ -751,3 +754,62 @@ fieldset.bare { border: 0; margin: 0; padding: 0; min-width: 0; }
 .chip-row .chip { flex: none; }
 .settings-form input[type="color"] { width: 64px; height: 38px; padding: 3px; }
 .status-manager > button { justify-self: start; }
+
+/* New project dialog, project types */
+.dialog { width: min(640px, 94vw); max-height: 90vh; overflow: auto; display: grid; gap: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: var(--shadow-pop); padding: 18px 20px; height: fit-content; animation: pop 0.16s var(--ease); }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; }
+.dialog-head h2 { margin: 0; }
+.type-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.type-card { display: grid; gap: 2px; text-align: left; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); height: auto; min-height: 0; }
+.type-card span { color: var(--ink-3); font-size: 0.8125rem; font-weight: 400; }
+.type-card:hover:not(.on) { background: var(--bg-hover); }
+.type-card.on { border-color: var(--accent); background: var(--accent-soft); }
+.add-project-btn { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 2px; padding: 6px 10px; border: 0; background: transparent; color: var(--ink-3); font-weight: 500; justify-content: flex-start; }
+.add-project-btn:hover { background: var(--bg-hover); color: var(--ink); }
+@media (max-width: 760px) { .type-grid { grid-template-columns: 1fr; } }
+
+/* Timeline */
+.timeline-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.gantt { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); }
+.g-row { display: grid; grid-template-columns: 220px max-content; min-height: 36px; border-bottom: 1px solid var(--border); }
+.gantt > div:last-child .g-row:last-child { border-bottom: 0; }
+.g-label { position: sticky; left: 0; z-index: 3; display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 10px; background: var(--surface); border-right: 1px solid var(--border); }
+.g-label strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.g-group .g-label, .g-group .g-track { background: var(--bg-sunken); }
+.g-track { position: relative; height: 36px; }
+.g-axis .g-track { height: 30px; }
+.g-month { position: absolute; top: 7px; padding-left: 4px; font-size: 0.75rem; font-weight: 600; color: var(--ink-3); white-space: nowrap; }
+.g-week { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border); opacity: 0.6; }
+.g-today { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--danger); opacity: 0.5; z-index: 1; }
+.g-title { border: 0; background: transparent; padding: 0; min-height: 0; height: auto; font-weight: 500; text-align: left; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.g-bar { position: absolute; top: 7px; height: 22px; min-height: 0; z-index: 2; padding: 0 8px; border: 0; border-radius: 6px; background: color-mix(in srgb, var(--c) 80%, var(--surface)); color: #fff; font-size: 0.75rem; font-weight: 600; text-align: left; white-space: nowrap; overflow: hidden; }
+.g-bar.done { opacity: 0.45; }
+.g-bar.late { outline: 2px solid var(--danger); outline-offset: 0; }
+.g-milestone { position: absolute; top: 9px; z-index: 2; transform: translateX(-50%); color: var(--accent); }
+.g-milestone svg { fill: currentColor; }
+.g-milestone.done { color: var(--ink-3); }
+.g-milestone.late { color: var(--danger); }
+.g-milestone.slipping { color: var(--warn); }
+.unscheduled { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+@media (max-width: 760px) { .g-row { grid-template-columns: 130px max-content; } }
+.panel.attention.warn { border-color: color-mix(in oklch, var(--warn) 45%, var(--border)); background: color-mix(in oklch, var(--warn-soft) 40%, var(--surface)); }
+.panel.attention > h2 { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.panel.attention h3 { margin: 12px 0 4px; font-size: 0.8125rem; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.04em; }
+.signals, .attention-list { list-style: none; margin: 0 0 4px; padding: 0; display: grid; gap: 4px; }
+.signals li { padding-left: 14px; position: relative; }
+.signals li::before { content: ""; position: absolute; left: 0; top: 0.6em; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
+.pm-stats + .alert, .panel.attention + .pm-stats { margin-top: 16px; }
+.milestones .ms-progress { display: grid; grid-template-columns: 140px auto; align-items: center; gap: 8px; margin-top: 4px; font-weight: 400; }
+.panel.attention { margin-bottom: 0; }
+.proj-label { margin-left: 8px; color: var(--ink-3); font-size: 0.75rem; font-weight: 500; }
+.attention-rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.attention-rows li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.attention-projects { list-style: none; margin: 0; padding: 0; display: grid; gap: 18px; }
+.attention-projects li { display: grid; gap: 8px; }
+.attention-projects .head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.attention-projects .name { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+.attention-projects .dot { width: 10px; height: 10px; border-radius: 50%; }
+.type-card { color: var(--ink); white-space: normal; align-content: start; justify-items: start; font-weight: 400; }
+.type-card strong { font-weight: 650; }
+.g-title { color: var(--ink); }
+.g-title:hover { color: var(--accent-ink); background: transparent; }

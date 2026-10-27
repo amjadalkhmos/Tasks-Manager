@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS projects (
   stage TEXT NOT NULL DEFAULT 'active' CHECK (stage IN ('planning','active','on_hold','completed','archived')),
   lead_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   start_date TEXT,
-  target_date TEXT
+  target_date TEXT,
+  type TEXT NOT NULL DEFAULT 'initiative' CHECK (type IN ('delivery','pipeline','initiative','support'))
 );
 -- Task statuses. Every status belongs to a category (todo, doing or done), which is what the app's logic (completion,
 -- recurrence, dependencies, progress) uses; the name and colour are the team's own. A status belongs either to one
@@ -106,7 +107,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   position DOUBLE PRECISION NOT NULL DEFAULT 0,
   estimate_min INTEGER,
   assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  status_id INTEGER REFERENCES statuses(id) ON DELETE SET NULL
+  status_id INTEGER REFERENCES statuses(id) ON DELETE SET NULL,
+  start_at TEXT,
+  milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL
 );
 CREATE TABLE IF NOT EXISTS task_tags (
   task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -229,6 +232,8 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS position DOUBLE PRECISION NOT NULL DE
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS estimate_min INTEGER;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS status_id INTEGER REFERENCES statuses(id) ON DELETE SET NULL;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS start_at TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS workspace_id INTEGER REFERENCES workspaces(id);
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
@@ -236,6 +241,7 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS stage TEXT NOT NULL DEFAULT 'activ
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS lead_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS start_date TEXT;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS target_date TEXT;
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'initiative' CHECK (type IN ('delivery','pipeline','initiative','support'));
 
 -- 3. Indexes
 CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id, status);
@@ -245,6 +251,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id);
 CREATE INDEX IF NOT EXISTS idx_projects_ws ON projects(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id);
 CREATE INDEX IF NOT EXISTS idx_statuses_ws ON statuses(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_statuses_project ON statuses(project_id);
 CREATE INDEX IF NOT EXISTS idx_project_updates ON project_updates(project_id, id);

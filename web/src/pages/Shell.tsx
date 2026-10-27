@@ -2,17 +2,20 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Bell, BookmarkCheck, CalendarClock, CalendarDays, ChartNoAxesColumn, Check, Hash, Inbox, FolderKanban, KanbanSquare, ListTodo, LogOut, Menu, Plus, RefreshCw, Search, Settings, Sun, Timer, UserCheck, Users, Video, WifiOff, X,
+  Bell, BookmarkCheck, CalendarClock, CalendarDays, ChartNoAxesColumn, Check, Hash, Inbox, BriefcaseBusiness, FolderKanban, KanbanSquare, TriangleAlert, ListTodo, LogOut, Menu, Plus, RefreshCw, Search, Settings, Sun, Timer, UserCheck, Users, Video, WifiOff, X,
 } from "lucide-react";
 import { api } from "../api";
 import { clearOfflineData, flushQueue, usePendingCount } from "../lib/offline";
 import { formatMinutes, startOfDay } from "../lib/tasks";
 import { useTaskActions } from "../lib/useTaskActions";
+import { NewProjectDialog } from "../components/NewProjectDialog";
 import { BoardPage } from "./BoardPage";
 import { CalendarPage } from "./CalendarPage";
 import { CommandPalette } from "./CommandPalette";
 import { DashboardPage } from "./DashboardPage";
+import { AttentionPage } from "./AttentionPage";
 import { MeetingsPage } from "./MeetingsPage";
+import { MyWorkPage } from "./MyWorkPage";
 import { NotificationsPage } from "./NotificationsPage";
 import { PortfolioPage } from "./PortfolioPage";
 import { ProjectPage } from "./ProjectPage";
@@ -130,7 +133,7 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
   const [openTask, setOpenTask] = useState<number | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
-  const [newProject, setNewProject] = useState("");
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newWorkspace, setNewWorkspace] = useState("");
 
   const addWorkspace = useMutation({
@@ -140,13 +143,6 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
       void qc.invalidateQueries({ queryKey: ["workspaces"] });
       void qc.invalidateQueries({ queryKey: ["people"] });
       navigate(`/workspace/${ws.id}`);
-    },
-  });
-  const addProject = useMutation({
-    mutationFn: (name: string) => api.createProject(name),
-    onSuccess: () => {
-      setNewProject("");
-      void qc.invalidateQueries({ queryKey: ["projects"] });
     },
   });
   const delFilter = useMutation({
@@ -231,6 +227,8 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
         <nav className="nav-group" style={{ marginTop: 10 }}>
           <NavLink to="/board"><KanbanSquare size={ICON} /><span className="label">Board</span></NavLink>
           <NavLink to="/calendar"><CalendarDays size={ICON} /><span className="label">Calendar</span></NavLink>
+          <NavLink to="/my-work"><BriefcaseBusiness size={ICON} /><span className="label">My work</span></NavLink>
+          <NavLink to="/attention"><TriangleAlert size={ICON} /><span className="label">Needs attention</span></NavLink>
           <NavLink to="/projects"><FolderKanban size={ICON} /><span className="label">Projects</span></NavLink>
           <NavLink to="/meetings"><Video size={ICON} /><span className="label">Meetings</span></NavLink>
           <NavLink to="/dashboard"><ChartNoAxesColumn size={ICON} /><span className="label">Dashboard</span></NavLink>
@@ -249,17 +247,9 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
             </NavLink>
           ))}
         </nav>
-        <form
-          className="add-project"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (newProject.trim()) addProject.mutate(newProject.trim());
-          }}
-        >
-          <Plus size={14} aria-hidden="true" />
-          <input aria-label="New project" placeholder="New project" value={newProject} onChange={(e) => setNewProject(e.target.value)} />
-        </form>
-        {addProject.error && <p className="nav-error" role="alert">{addProject.error.message}</p>}
+        <button type="button" className="add-project-btn" onClick={() => setNewProjectOpen(true)}>
+          <Plus size={14} aria-hidden="true" /> New project
+        </button>
 
         <div className="nav-title">Workspaces</div>
         {workspaces.data?.map((w) => (
@@ -360,6 +350,8 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
             <Route path="/assigned" element={<TaskList view="assigned" onOpen={open} />} />
             <Route path="/project/:id" element={<ProjectPage onOpen={open} />} />
             <Route path="/projects" element={<PortfolioPage />} />
+            <Route path="/my-work" element={<MyWorkPage onOpen={open} />} />
+            <Route path="/attention" element={<AttentionPage onOpen={open} />} />
             <Route path="/tag/:name" element={<TaskList view="tag" onOpen={open} />} />
             <Route path="/filter/:id" element={<TaskList view="filter" onOpen={open} />} />
             <Route path="/board" element={<BoardPage onOpen={open} />} />
@@ -374,6 +366,7 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
       </main>
 
       {openTask !== null && <TaskDetail key={openTask} id={openTask} onClose={() => setOpenTask(null)} onOpen={open} />}
+      {newProjectOpen && <NewProjectDialog onClose={() => setNewProjectOpen(false)} />}
       {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} onOpenTask={open} />}
     </div>
   );

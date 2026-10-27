@@ -4,6 +4,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { LogOut, Mail, Pencil, Plus, Trash2, UserMinus, X } from "lucide-react";
 import { api, type Member, type Role } from "../api";
 import { Avatar } from "../components/Avatar";
+import { NewProjectDialog } from "../components/NewProjectDialog";
 import { StatusManager } from "../components/StatusManager";
 import { describeActivity } from "../lib/activity";
 import { usePeople } from "../lib/people";
@@ -49,7 +50,7 @@ export function WorkspacePage({ onOpenTask }: { onOpenTask: (id: number) => void
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<"admin" | "member" | "viewer">("member");
   const [invited, setInvited] = useState<string | null>(null);
-  const [newProject, setNewProject] = useState("");
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState("");
 
@@ -70,7 +71,6 @@ export function WorkspacePage({ onOpenTask }: { onOpenTask: (id: number) => void
       if (self) navigate("/");
     },
   });
-  const addProject = useMutation({ mutationFn: (name: string) => api.createProject(name, wsId), onSuccess: () => (setNewProject(""), refreshAll()) });
   const delProject = useMutation({ mutationFn: api.deleteProject, onSuccess: refreshAll });
   const delWorkspace = useMutation({
     mutationFn: () => api.deleteWorkspace(wsId),
@@ -95,7 +95,7 @@ export function WorkspacePage({ onOpenTask }: { onOpenTask: (id: number) => void
   const isAdmin = mine === "owner" || mine === "admin";
   const wsProjects = (projects.data ?? []).filter((p) => p.workspace_id === wsId);
   const openIn = (projectId: number) => (tasks.data ?? []).filter((t) => t.project_id === projectId && t.status !== "done" && t.parent_id === null).length;
-  const error = (rename.error ?? invite.error ?? revoke.error ?? setRole.error ?? removeMember.error ?? addProject.error ?? delProject.error ?? delWorkspace.error)?.message;
+  const error = (rename.error ?? invite.error ?? revoke.error ?? setRole.error ?? removeMember.error ?? delProject.error ?? delWorkspace.error)?.message;
 
   return (
     <div>
@@ -246,11 +246,11 @@ export function WorkspacePage({ onOpenTask }: { onOpenTask: (id: number) => void
           ))}
         </ul>
         {mine !== "viewer" && (
-          <form className="invite-form" onSubmit={(e) => (e.preventDefault(), newProject.trim() && addProject.mutate(newProject.trim()))}>
-            <input aria-label="New project name" placeholder="New project name" value={newProject} onChange={(e) => setNewProject(e.target.value)} />
-            <button type="submit" className="secondary" disabled={!newProject.trim() || addProject.isPending}><Plus size={15} /> Add project</button>
-          </form>
+          <div className="invite-form">
+            <button type="button" className="secondary" onClick={() => setNewProjectOpen(true)}><Plus size={15} /> New project</button>
+          </div>
         )}
+        {newProjectOpen && <NewProjectDialog workspaceId={wsId} onClose={() => setNewProjectOpen(false)} />}
       </section>
 
       <section className="panel" aria-label="Task statuses">

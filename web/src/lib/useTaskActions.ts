@@ -6,7 +6,7 @@ export function useTaskActions() {
   const qc = useQueryClient();
   const refresh = () =>
     Promise.all(
-      ["tasks", "tags", "stats", "timer", "checklist", "meetings", "task-meetings", "overview", "portfolio"].map((k) => qc.invalidateQueries({ queryKey: [k] })),
+      ["tasks", "tags", "stats", "timer", "checklist", "meetings", "task-meetings", "overview", "portfolio", "attention"].map((k) => qc.invalidateQueries({ queryKey: [k] })),
     );
 
   const complete = useMutation({ mutationFn: (id: number) => api.completeTask(id), onSuccess: refresh });

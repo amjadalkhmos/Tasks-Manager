@@ -58,7 +58,8 @@ CREATE TABLE IF NOT EXISTS projects (
   stage TEXT NOT NULL DEFAULT 'active' CHECK (stage IN ('planning','active','on_hold','completed','archived')),
   lead_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   start_date TEXT,
-  target_date TEXT
+  target_date TEXT,
+  type TEXT NOT NULL DEFAULT 'initiative' CHECK (type IN ('delivery','pipeline','initiative','support'))
 );
 -- Task statuses. Every status belongs to a category (todo, doing or done), which is what the app's logic (completion,
 -- recurrence, dependencies, progress) uses; the name and colour are the team's own. A status belongs either to one
@@ -118,7 +119,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   position ${REAL} NOT NULL DEFAULT 0,
   estimate_min INTEGER,
   assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-  status_id INTEGER REFERENCES statuses(id) ON DELETE SET NULL
+  status_id INTEGER REFERENCES statuses(id) ON DELETE SET NULL,
+  start_at TEXT,
+  milestone_id INTEGER REFERENCES milestones(id) ON DELETE SET NULL
 );
 CREATE TABLE IF NOT EXISTS task_tags (
   task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -247,6 +250,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id);
 CREATE INDEX IF NOT EXISTS idx_projects_ws ON projects(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_milestone ON tasks(milestone_id);
 CREATE INDEX IF NOT EXISTS idx_statuses_ws ON statuses(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_statuses_project ON statuses(project_id);
 CREATE INDEX IF NOT EXISTS idx_project_updates ON project_updates(project_id, id);
@@ -274,6 +278,8 @@ export const ADDED_COLUMNS: Record<string, [string, string][]> = {
     ["estimate_min", "INTEGER"],
     ["assignee_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"],
     ["status_id", "INTEGER REFERENCES statuses(id) ON DELETE SET NULL"],
+    ["start_at", "TEXT"],
+    ["milestone_id", "INTEGER REFERENCES milestones(id) ON DELETE SET NULL"],
   ],
   users: [["name", "TEXT"]],
   projects: [
@@ -283,6 +289,7 @@ export const ADDED_COLUMNS: Record<string, [string, string][]> = {
     ["lead_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"],
     ["start_date", "TEXT"],
     ["target_date", "TEXT"],
+    ["type", "TEXT NOT NULL DEFAULT 'initiative' CHECK (type IN ('delivery','pipeline','initiative','support'))"],
   ],
 };
 

@@ -10,7 +10,7 @@ import { logActivity, notify, userName } from "./events.js";
 import { HttpError, parseId } from "./http-error.js";
 import { nextOccurrence, parseRule, recurrenceSchema } from "./recurrence.js";
 import { assertLeadAllowed } from "./pm.js";
-import { keepOrPick, statusFits, statusFor } from "./statuses.js";
+import { PROJECT_TYPES, keepOrPick, seedProjectStatuses, statusFits, statusFor } from "./statuses.js";
 
 const iso = z.string().datetime({ offset: true });
 
@@ -23,6 +23,8 @@ const taskFields = {
   priority: z.number().int().min(0).max(3),
   status: z.enum(["todo", "doing", "done"]),
   status_id: z.number().int().nullable(),
+  start_at: iso.nullable(),
+  milestone_id: z.number().int().nullable(),
   due_at: iso.nullable(),
   remind_at: iso.nullable(),
   recurrence: recurrenceSchema.nullable(),
@@ -37,12 +39,13 @@ const projectBody = z.object({
   name: z.string().min(1).max(100),
   color: z.string().regex(/^#[0-9a-f]{6}$/i),
   workspace_id: z.number().int().nullable(),
+  type: z.enum(PROJECT_TYPES),
   description: z.string().max(5000),
   lead_id: z.number().int().nullable(),
   start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((v) => !Number.isNaN(Date.parse(v)), "Not a real date").nullable(),
   target_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((v) => !Number.isNaN(Date.parse(v)), "Not a real date").nullable(),
 });
-const PROJECT_COLS = "id, name, color, workspace_id, description, stage, lead_id, start_date, target_date";
+const PROJECT_COLS = "id, name, color, workspace_id, type, description, stage, lead_id, start_date, target_date";
 
 interface Deps {
   db: DB;
@@ -155,6 +158,8 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
       remind_at: string | null;
       status: string;
       status_id: number | null;
+      start_at: string | null;
+      milestone_id: number | null;
     };
   };
 
@@ -185,6 +190,15 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     }
   };
 
+  const checkDates = (start: string | null, due: string | null) => {
+    if (start && due && Date.parse(start) > Date.parse(due)) throw new HttpError(400, "The start can't be after the due date");
+  };
+  const checkMilestone = async (q: Queryable, milestoneId: number, projectId: number | null) => {
+    if (projectId === null || !(await q.get("SELECT 1 FROM milestones WHERE id = ? AND project_id = ?", milestoneId, projectId))) {
+      throw new HttpError(400, "That milestone doesn't belong to this project");
+    }
+  };
+
   const assertAssignable = async (q: Queryable, workspaceId: number | null, assigneeId: number) => {
     if (workspaceId === null) throw new HttpError(400, "Only tasks in a workspace can be assigned");
     if (!(await isMemberAtLeast(q, workspaceId, assigneeId, "member"))) throw new HttpError(400, "The assignee must be a member of the workspace");
@@ -204,26 +218,36 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
   });
 
   app.post("/api/projects", auth, async (req, res) => {
-    const b = projectBody.pick({ name: true, color: true, workspace_id: true }).partial({ color: true, workspace_id: true }).parse(req.body);
+    const b = projectBody.partial().required({ name: true }).parse(req.body);
     const me = uid(req);
     if (b.workspace_id != null) {
       const role = await roleIn(db, b.workspace_id, me);
       if (!role) throw new HttpError(404, "Workspace not found");
       if (!atLeast(role, "member")) throw FORBIDDEN();
     }
-    const id = await db.insert("INSERT INTO projects (user_id, name, color, workspace_id) VALUES (?, ?, COALESCE(?, '#4f46e5'), ?)", me, b.name, b.color ?? null, b.workspace_id ?? null);
-    await logActivity(db, b.workspace_id ?? null, me, "project_created", null, { name: b.name });
+    if (b.lead_id != null) await assertLeadAllowed(db, b.workspace_id ?? null, me, b.lead_id);
+    if (b.start_date && b.target_date && b.target_date < b.start_date) throw new HttpError(400, "The target date can't be before the start date");
+    const type = b.type ?? "initiative";
+    const id = await db.tx(async (t) => {
+      const projectId = await t.insert(
+        "INSERT INTO projects (user_id, name, color, workspace_id, type, description, lead_id, start_date, target_date) VALUES (?, ?, COALESCE(?, '#4f46e5'), ?, ?, ?, ?, ?, ?)",
+        me, b.name, b.color ?? null, b.workspace_id ?? null, type, b.description ?? "", b.lead_id ?? null, b.start_date ?? null, b.target_date ?? null,
+      );
+      await seedProjectStatuses(t, projectId, type);
+      await logActivity(t, b.workspace_id ?? null, me, "project_created", null, { name: b.name });
+      return projectId;
+    });
     res.status(201).json(await db.get(`SELECT ${PROJECT_COLS} FROM projects WHERE id = ?`, id));
   });
 
   app.patch("/api/projects/:id", auth, async (req, res) => {
-    const b = projectBody.pick({ name: true, color: true, description: true, lead_id: true, start_date: true, target_date: true }).partial().parse(req.body);
+    const b = projectBody.pick({ name: true, color: true, type: true, description: true, lead_id: true, start_date: true, target_date: true }).partial().parse(req.body);
     const pa = await projectAccess(db, uid(req), parseId(req.params.id, "Project not found"));
     if (!pa) throw new HttpError(404, "Project not found");
     if (pa.workspaceId !== null && !(pa.canManage || (pa.canWrite && pa.creatorId === uid(req)))) throw FORBIDDEN();
     if (b.lead_id != null) await assertLeadAllowed(db, pa.workspaceId, pa.creatorId, b.lead_id);
     await db.tx(async (t) => {
-      await t.run("UPDATE projects SET name = COALESCE(?, name), color = COALESCE(?, color), description = COALESCE(?, description) WHERE id = ?", b.name ?? null, b.color ?? null, b.description ?? null, pa.id);
+      await t.run("UPDATE projects SET name = COALESCE(?, name), color = COALESCE(?, color), type = COALESCE(?, type), description = COALESCE(?, description) WHERE id = ?", b.name ?? null, b.color ?? null, b.type ?? null, b.description ?? null, pa.id);
       // These can be cleared, so they are set only when given (null clears).
       if (b.lead_id !== undefined) await t.run("UPDATE projects SET lead_id = ? WHERE id = ?", b.lead_id, pa.id);
       if (b.start_date !== undefined) await t.run("UPDATE projects SET start_date = ? WHERE id = ?", b.start_date, pa.id);
@@ -355,14 +379,16 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     }
     if (parent && parent.workspaceId !== workspaceId) throw new HttpError(400, "A subtask must be in the same workspace as its parent");
     if (b.assignee_id != null) await assertAssignable(db, workspaceId, b.assignee_id);
+    checkDates(b.start_at ?? null, b.due_at ?? null);
+    if (b.milestone_id != null) await checkMilestone(db, b.milestone_id, projectId);
 
     const id = await db.tx(async (t) => {
       const taskId = await t.insert(
-        `INSERT INTO tasks (user_id, project_id, parent_id, assignee_id, title, notes, priority, status, status_id, due_at, remind_at, recurrence_rule, completed_at, position, estimate_min)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(CAST(? AS REAL), (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE user_id = ?)), ?)`,
+        `INSERT INTO tasks (user_id, project_id, parent_id, assignee_id, title, notes, priority, status, status_id, due_at, remind_at, recurrence_rule, completed_at, position, estimate_min, start_at, milestone_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(CAST(? AS REAL), (SELECT COALESCE(MAX(position), 0) + 1 FROM tasks WHERE user_id = ?)), ?, ?, ?)`,
         me, projectId, b.parent_id ?? null, b.assignee_id ?? null, b.title, b.notes ?? "", b.priority ?? 0, status, statusId,
         b.due_at ?? null, b.remind_at ?? null, b.recurrence ? JSON.stringify(b.recurrence) : null,
-        status === "done" ? new Date().toISOString() : null, b.position ?? null, me, b.estimate_min ?? null,
+        status === "done" ? new Date().toISOString() : null, b.position ?? null, me, b.estimate_min ?? null, b.start_at ?? null, b.milestone_id ?? null,
       );
       await setTags(t, me, taskId, b.tags ?? []);
       await logActivity(t, workspaceId, me, "task_created", taskId, { title: b.title });
@@ -411,6 +437,12 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     } else if (b.status !== undefined || newProject !== current.project_id) {
       newStatusId = await keepOrPick(db, newStatusId, newProject, newWs, (b.status ?? current.status) as "todo" | "doing" | "done");
     }
+    const newStart = b.start_at === undefined ? (current.start_at as string | null) : b.start_at;
+    checkDates(newStart, b.due_at === undefined ? (current.due_at as string | null) : b.due_at);
+    // A milestone belongs to one project, so it is dropped when the task moves to another.
+    let newMilestone = b.milestone_id === undefined ? (current.milestone_id as number | null) : b.milestone_id;
+    if (newProject !== current.project_id && b.milestone_id === undefined) newMilestone = null;
+    if (newMilestone !== null && newMilestone !== current.milestone_id) await checkMilestone(db, newMilestone, newProject);
     const scopeChange = newWs !== ta.workspaceId;
     // Moving work between private and shared (or between workspaces) is for its author, or a workspace admin moving it elsewhere shared.
     if (scopeChange && !(current.user_id === me || (ta.canManage && newWs !== null))) throw FORBIDDEN();
@@ -439,12 +471,13 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
         sets.push(`${col} = ?`);
         args.push(val);
       };
-      for (const key of ["title", "notes", "priority", "status", "due_at", "position", "estimate_min"] as const) {
+      for (const key of ["title", "notes", "priority", "status", "due_at", "start_at", "position", "estimate_min"] as const) {
         if (b[key] !== undefined) set(key, b[key]);
       }
       if (newProject !== current.project_id) set("project_id", newProject);
       if (newParent !== current.parent_id) set("parent_id", newParent);
       if (newStatusId !== current.status_id) set("status_id", newStatusId);
+      if (newMilestone !== current.milestone_id) set("milestone_id", newMilestone);
       if (newAssignee !== current.assignee_id) set("assignee_id", newAssignee);
       if (b.remind_at !== undefined) {
         set("remind_at", b.remind_at);
@@ -464,7 +497,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
         // Subtasks lose their assignees: those people may not be in the destination.
         await t.run(`UPDATE tasks SET assignee_id = NULL WHERE id IN (${m}) AND id != ?`, ...family, taskId);
         // ...and fall back to the default status of their category, since the statuses differ in the new place.
-        await t.run(`UPDATE tasks SET status_id = NULL WHERE id IN (${m}) AND id != ?`, ...family, taskId);
+        await t.run(`UPDATE tasks SET status_id = NULL, milestone_id = NULL WHERE id IN (${m}) AND id != ?`, ...family, taskId);
         const outside = await t.all<{ task_id: number; blocked_by_id: number }>(
           `SELECT d.task_id, d.blocked_by_id FROM task_deps d
            WHERE (d.task_id IN (${m}) AND d.blocked_by_id NOT IN (${m})) OR (d.blocked_by_id IN (${m}) AND d.task_id NOT IN (${m}))`,
@@ -527,7 +560,9 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
         due, remind, task.id,
       );
       await setTags(t, me, spawned, task.tags);
-      await t.run("UPDATE tasks SET status_id = ? WHERE id = ?", await statusFor(t, task.project_id, task.workspace_id, "todo"), spawned);
+      // The next occurrence keeps the same lead time between start and due.
+      const start = task.start_at && task.due_at ? new Date(Date.parse(task.start_at as string) + (Date.parse(due) - Date.parse(task.due_at))).toISOString() : null;
+      await t.run("UPDATE tasks SET status_id = ?, start_at = ? WHERE id = ?", await statusFor(t, task.project_id, task.workspace_id, "todo"), start, spawned);
       return spawned;
     });
     res.json({ completed: await getTask(me, task.id), next: nextId ? await getTask(me, nextId) : null });

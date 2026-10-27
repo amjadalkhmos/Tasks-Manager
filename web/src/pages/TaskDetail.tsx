@@ -132,6 +132,8 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
   }, [onClose]);
 
   const statuses = useStatuses();
+  const planProject = task && draft && draft.project_id === task.project_id ? task.project_id : null;
+  const plan = useQuery({ queryKey: ["overview", planProject], queryFn: () => api.overview(planProject!), enabled: planProject !== null, retry: false });
   const save = useMutation({
     mutationFn: async (d: Task) => {
       // Only send the status when it was changed here and the task stays where it is; after a move the server picks one.
@@ -139,6 +141,8 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
       const becomesDone = !!statusChanged && d.status === "done" && task!.status !== "done";
       await api.updateTask(d.id, {
         ...(statusChanged && !becomesDone ? (d.status_id !== null ? { status_id: d.status_id } : { status: d.status, status_id: null }) : {}),
+        ...(task && d.project_id === task.project_id && d.milestone_id !== task.milestone_id ? { milestone_id: d.milestone_id } : {}),
+        start_at: d.start_at,
         title: d.title,
         notes: d.notes,
         priority: d.priority,
@@ -281,6 +285,16 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
                 ))}
               </select>
             </Prop>
+            {planProject !== null && (plan.data?.milestones.length ?? 0) > 0 && (
+              <Prop icon={<Flag size={15} />} label="Milestone">
+                <select aria-label="Milestone" value={draft.milestone_id ?? ""} onChange={(e) => patch({ milestone_id: e.target.value ? Number(e.target.value) : null })}>
+                  <option value="">None</option>
+                  {plan.data!.milestones.map((m) => (
+                    <option key={m.id} value={m.id}>{m.name}{m.due_date ? ` · ${m.due_date}` : ""}</option>
+                  ))}
+                </select>
+              </Prop>
+            )}
             {task.workspace_id !== null && (
               <Prop icon={<UserCheck size={15} />} label="Assignee">
                 <select
@@ -295,6 +309,9 @@ export function TaskDetail({ id, onClose, onOpen }: { id: number; onClose: () =>
                 </select>
               </Prop>
             )}
+            <Prop icon={<CalendarDays size={15} />} label="Start">
+              <input type="datetime-local" aria-label="Start" value={toLocalInput(draft.start_at)} onChange={(e) => patch({ start_at: fromLocalInput(e.target.value) })} />
+            </Prop>
             <Prop icon={<CalendarDays size={15} />} label="Due">
               <input type="datetime-local" aria-label="Due" value={toLocalInput(draft.due_at)} onChange={(e) => patch({ due_at: fromLocalInput(e.target.value) })} />
             </Prop>

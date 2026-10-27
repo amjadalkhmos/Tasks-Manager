@@ -217,7 +217,11 @@ describe("IN-list helpers", () => {
 describe("upgrading an existing database", () => {
   it("adds columns and tables introduced since it was created", async () => {
     // Put the database back the way an earlier version left it: no statuses, no project details.
-    await db.exec(`DROP TABLE milestones; DROP TABLE project_updates; DROP INDEX idx_tasks_status`);
+    await db.exec(`DROP INDEX idx_tasks_milestone; DROP INDEX idx_tasks_status`);
+    await db.exec(`ALTER TABLE tasks DROP COLUMN milestone_id`);
+    await db.exec(`ALTER TABLE tasks DROP COLUMN start_at`);
+    await db.exec(`DROP TABLE milestones; DROP TABLE project_updates`);
+    await db.exec(`ALTER TABLE projects DROP COLUMN type`);
     if (db.dialect === "postgres") {
       await db.exec(`ALTER TABLE tasks DROP COLUMN status_id; DROP TABLE statuses`);
       await db.exec(`ALTER TABLE projects DROP COLUMN description, DROP COLUMN stage, DROP COLUMN lead_id, DROP COLUMN start_date, DROP COLUMN target_date`);
@@ -232,7 +236,8 @@ describe("upgrading an existing database", () => {
     await createSchema(db);
     await createSchema(db); // and it is safe to run again
 
-    expect(await db.get("SELECT stage, description, lead_id FROM projects WHERE id = ?", pid)).toEqual({ stage: "active", description: "", lead_id: null });
+    expect(await db.get("SELECT stage, type, description, lead_id FROM projects WHERE id = ?", pid)).toEqual({ stage: "active", type: "initiative", description: "", lead_id: null });
+    expect(await db.get("SELECT start_at, milestone_id FROM tasks WHERE user_id = ?", uid)).toEqual({ start_at: null, milestone_id: null });
     expect(await db.get("SELECT status_id FROM tasks WHERE user_id = ?", uid)).toEqual({ status_id: null });
     expect(await db.get("SELECT COUNT(*) AS n FROM statuses")).toEqual({ n: 0 });
   });

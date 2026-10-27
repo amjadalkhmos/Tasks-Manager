@@ -5,7 +5,8 @@ import { FolderKanban } from "lucide-react";
 import { api, type PortfolioRow, type Stage } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import { HealthBadge, ProgressBar, StageBadge } from "../components/ProjectBadges";
-import { STAGE_LABEL, STAGE_ORDER, describeDeadline, formatDay, percent } from "../lib/projects";
+import { HEALTH_LABEL, STAGE_LABEL, STAGE_ORDER, describeDeadline, formatDay } from "../lib/projects";
+import { TYPE_INFO } from "../lib/projectTypes";
 import { usePeople } from "../lib/people";
 
 type Filter = "live" | "all" | Stage;
@@ -81,14 +82,19 @@ export function PortfolioPage() {
                   <tr key={r.id}>
                     <td>
                       <Link className="name" to={`/project/${r.id}?tab=overview`}><span className="dot" style={{ background: r.color }} />{r.name}</Link>
-                      <span className="muted small">{wsName(r.workspace_id)}</span>
+                      <span className="muted small">{TYPE_INFO[r.type].label} · {wsName(r.workspace_id)}</span>
                     </td>
                     <td><StageBadge stage={r.stage} /></td>
-                    <td><HealthBadge health={r.health} /></td>
+                    <td>
+                      <HealthBadge health={r.health} />
+                      {r.suggested_health && r.suggested_health !== (r.health ?? "on_track") && (
+                        <div className="muted small" title={r.signals.map((s) => s.text).join(". ")}>Numbers say: {HEALTH_LABEL[r.suggested_health]}</div>
+                      )}
+                    </td>
                     <td>
                       <div className="prog">
-                        <ProgressBar done={r.tasks_done} total={r.tasks_total} label={`${r.name} progress`} />
-                        <span className="muted small">{percent(r.tasks_done, r.tasks_total)}% · {r.tasks_done}/{r.tasks_total}</span>
+                        <ProgressBar done={r.progress_pct} total={100} label={`${r.name} progress`} />
+                        <span className="muted small">{r.progress_pct}% · {r.tasks_done}/{r.tasks_total} tasks</span>
                       </div>
                     </td>
                     <td className={r.tasks_overdue ? "late-text" : "muted"}>{r.tasks_overdue}</td>
