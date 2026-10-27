@@ -3,6 +3,7 @@ import request from "supertest";
 import { createApp } from "./app.js";
 import type { DB } from "./db.js";
 import { parseAddress, rateLimiter, stripQuoted } from "./intake.js";
+import { seedProjectStatuses } from "./statuses.js";
 import { testDb } from "./test-db.js";
 
 process.env.BCRYPT_ROUNDS = "4";
@@ -45,6 +46,14 @@ const create = (a: Agent, body: object, status = 201) => a.post("/api/projects")
 const task = async (a: Agent, body: object, status = 201) => (await a.post("/api/tasks").send(body).expect(status)).body as Json;
 const getTask = async (a: Agent, id: number) => (await a.get(`/api/tasks/${id}`).expect(200)).body as Json;
 const overview = async (a: Agent, id: number) => (await a.get(`/api/projects/${id}/overview`).expect(200)).body as Json;
+
+/** Sales pipelines now live under Sales and can't be created as projects; this makes the old kind, as an existing database still holds. */
+async function legacyPipeline(a: Agent, name: string) {
+  const p = (await a.post("/api/projects").send({ name, workspace_id: t.ws }).expect(201)).body as Json;
+  await t.db.run("UPDATE projects SET type = 'pipeline' WHERE id = ?", p.id);
+  await seedProjectStatuses(t.db, p.id, "pipeline");
+  return { ...p, type: "pipeline" } as Json;
+}
 
 let t: Team;
 let desk: number;
@@ -310,7 +319,7 @@ describe("sales pipeline", () => {
   let leads: number;
   const stage = async (name: string) => ((await t.carol.get("/api/statuses")).body as Json[]).find((s) => s.project_id === leads && s.name === name)!;
   beforeEach(async () => {
-    leads = (await create(t.alice, { name: "Leads", workspace_id: t.ws, type: "pipeline" })).id;
+    leads = (await legacyPipeline(t.alice, "Leads")).id;
   });
 
   it("starts each stage with a chance of winning, which managers can change", async () => {

@@ -2,9 +2,9 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Bell, BookmarkCheck, CalendarClock, CalendarDays, ChartNoAxesColumn, Check, Hash, Inbox, BriefcaseBusiness, FolderKanban, KanbanSquare, TriangleAlert, ListTodo, LogOut, Menu, Plus, RefreshCw, Search, Settings, Sun, Timer, UserCheck, Users, Video, WifiOff, X,
+  Bell, BookmarkCheck, CalendarClock, CalendarDays, ChartNoAxesColumn, Check, Hash, HandCoins, Inbox, BriefcaseBusiness, FolderKanban, KanbanSquare, TriangleAlert, ListTodo, LogOut, Menu, Plus, RefreshCw, Search, Settings, Sun, Timer, UserCheck, Users, Video, WifiOff, X,
 } from "lucide-react";
-import { api } from "../api";
+import { api, salesApi } from "../api";
 import { clearOfflineData, flushQueue, usePendingCount } from "../lib/offline";
 import { formatMinutes, startOfDay } from "../lib/tasks";
 import { useTaskActions } from "../lib/useTaskActions";
@@ -19,6 +19,7 @@ import { MyWorkPage } from "./MyWorkPage";
 import { NotificationsPage } from "./NotificationsPage";
 import { PortfolioPage } from "./PortfolioPage";
 import { ProjectPage } from "./ProjectPage";
+import { SalesHome, SalesLayout } from "./sales/SalesLayout";
 import { SettingsPage } from "./SettingsPage";
 import { WorkspacePage } from "./WorkspacePage";
 import { TaskDetail } from "./TaskDetail";
@@ -126,6 +127,8 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
   const filters = useQuery({ queryKey: ["filters"], queryFn: api.filters });
   const tasks = useQuery({ queryKey: ["tasks"], queryFn: () => api.tasks() });
   const workspaces = useQuery({ queryKey: ["workspaces"], queryFn: api.workspaces });
+  // Sales is shown only to people an admin has switched it on for.
+  const salesSpaces = useQuery({ queryKey: ["sales", "workspaces"], queryFn: salesApi.workspaces });
   // Mentions, assignments and invitations: checked every 30 seconds and whenever the window regains focus.
   const alerts = useQuery({ queryKey: ["alerts"], queryFn: api.alerts, refetchInterval: 30_000 });
   const { reminders, dismiss } = useReminders();
@@ -200,7 +203,7 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
   const shelved = (p: { stage: string }) => p.stage === "archived";
   const personalProjects = (projects.data ?? []).filter((p) => p.workspace_id === null && !shelved(p));
 
-  const wide = /^\/(board|calendar)/.test(pathname);
+  const wide = /^\/(board|calendar)/.test(pathname) || /^\/sales\/\d+\/pipeline/.test(pathname);
 
   return (
     <div className="app">
@@ -231,6 +234,7 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
           <NavLink to="/attention"><TriangleAlert size={ICON} /><span className="label">Needs attention</span></NavLink>
           <NavLink to="/projects"><FolderKanban size={ICON} /><span className="label">Projects</span></NavLink>
           <NavLink to="/meetings"><Video size={ICON} /><span className="label">Meetings</span></NavLink>
+          {!!salesSpaces.data?.length && <NavLink to="/sales"><HandCoins size={ICON} /><span className="label">Sales</span></NavLink>}
           <NavLink to="/dashboard"><ChartNoAxesColumn size={ICON} /><span className="label">Dashboard</span></NavLink>
           <NavLink to="/notifications">
             <Bell size={ICON} /><span className="label">Notifications</span>
@@ -357,6 +361,8 @@ export function Shell({ user }: { user: { id: number; email: string } }) {
             <Route path="/board" element={<BoardPage onOpen={open} />} />
             <Route path="/calendar" element={<CalendarPage onOpen={open} />} />
             <Route path="/meetings" element={<MeetingsPage onOpenTask={open} />} />
+            <Route path="/sales" element={<SalesHome />} />
+            <Route path="/sales/:wid/*" element={<SalesLayout />} />
             <Route path="/dashboard" element={<DashboardPage onOpen={open} />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/notifications" element={<NotificationsPage onOpenTask={open} />} />

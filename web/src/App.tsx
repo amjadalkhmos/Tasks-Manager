@@ -4,6 +4,7 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { api } from "./api";
 import { clearApiCaches, setCurrentUser } from "./lib/offline";
 import { LoginPage } from "./pages/LoginPage";
+import { PublicLeadPage } from "./pages/PublicLeadPage";
 import { PublicSupportPage } from "./pages/PublicSupportPage";
 import { Shell } from "./pages/Shell";
 
@@ -23,6 +24,15 @@ export function App() {
     return (
       <Routes>
         <Route path="/support/:token" element={<PublicSupportPage />} />
+      </Routes>
+    );
+  }
+
+  // A prospect's contact form: the same, public and bare.
+  if (pathname.startsWith("/inquiry/")) {
+    return (
+      <Routes>
+        <Route path="/inquiry/:token" element={<PublicLeadPage />} />
       </Routes>
     );
   }

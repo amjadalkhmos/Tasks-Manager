@@ -51,6 +51,17 @@ describe.runIf(backend === "sqlite")("copying a SQLite database to PostgreSQL", 
     // a shared meeting linked to a shared task, and a private one linked to a private task
     const sharedMeeting = (await alice.post("/api/meetings").send({ title: "Planning", starts_at: "2026-03-04T10:00:00.000Z", workspace_id: ws, task_ids: [later.id], location: "Room 1", url: "https://meet.example.com/x" }).expect(201)).body;
     await alice.post("/api/meetings").send({ title: "Dentist", starts_at: "2026-03-05T09:00:00.000Z", task_ids: [first.id] }).expect(201);
+    // sales: a grant, an account with a contact, a lead, a deal with an activity and a follow-up, and a public form
+    const bobId = (await bob.get("/api/auth/me")).body.id;
+    await alice.put(`/api/workspaces/${ws}/sales-access/${bobId}`).send({ enabled: true, grants: [{ owner_id: aliceId, level: "view" }] }).expect(200);
+    const pipelineId = (await alice.get("/api/sales/me").query({ workspace_id: ws })).body.pipelines[0].id;
+    const acct = (await alice.post("/api/sales/accounts").send({ workspace_id: ws, name: "Acme Corp", website: "acme.test" }).expect(201)).body.id;
+    await alice.post("/api/sales/contacts").send({ workspace_id: ws, name: "Pat", email: "pat@acme.test", account_id: acct }).expect(201);
+    await alice.post("/api/sales/leads").send({ workspace_id: ws, name: "Lee", email: "lee@x.test" }).expect(201);
+    const dealId = (await alice.post("/api/sales/deals").send({ workspace_id: ws, title: "Rollout", account_id: acct, pipeline_id: pipelineId, value: 900 }).expect(201)).body.id;
+    await alice.post("/api/sales/activities").send({ deal_id: dealId, kind: "call", subject: "Intro" }).expect(201);
+    await alice.post("/api/sales/followups").send({ deal_id: dealId, title: "Send quote" }).expect(201);
+    await alice.post("/api/sales/forms").send({ workspace_id: ws, name: "Web" }).expect(201);
     await alice.post(`/api/tasks/${first.id}/timer/start`).expect(201);
     await alice.post("/api/timer/stop").expect(200);
     await alice.post(`/api/tasks/${later.id}/complete`).expect(200); // spawns the next occurrence
@@ -75,6 +86,12 @@ describe.runIf(backend === "sqlite")("copying a SQLite database to PostgreSQL", 
           statuses: await get("/api/statuses", cookie),
           portfolio: await get("/api/portfolio", cookie),
           overview: await get(`/api/projects/${project}/overview`, cookie),
+          salesMe: await get(`/api/sales/me?workspace_id=${ws}`, cookie),
+          salesLeads: await get(`/api/sales/leads?workspace_id=${ws}`, cookie),
+          salesAccounts: await get(`/api/sales/accounts?workspace_id=${ws}`, cookie),
+          salesDeals: await get(`/api/sales/deals?workspace_id=${ws}`, cookie),
+          salesDeal: await get(`/api/sales/deals/${dealId}`, cookie),
+          salesForecast: await get(`/api/sales/forecast?workspace_id=${ws}`, cookie),
           taskMeetings: await get(`/api/tasks/${later.id}/meetings`, cookie),
           stats: await get("/api/stats", cookie),
           export: name === "alice" ? await get("/api/export", cookie) : null,
@@ -100,6 +117,7 @@ describe.runIf(backend === "sqlite")("copying a SQLite database to PostgreSQL", 
     expect(report.copied.statuses).toBe(8); // 3 defaults + "In review" for the workspace, 3 defaults + "Blocked upstream" for the project
     expect(report.copied.milestones).toBe(1);
     expect(report.copied.project_updates).toBe(3);
+    expect(report.copied).toMatchObject({ pipelines: 1, pipeline_stages: 5, accounts: 1, contacts: 1, leads: 1, deals: 1, sales_activities: 2, sales_access: 2, lead_forms: 1 }); // "Created in Qualified" and the call
     expect(sharedMeeting.task_ids).toEqual([later.id]);
 
     const migrated = createApp(target, SECRET);

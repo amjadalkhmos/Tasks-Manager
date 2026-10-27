@@ -5,6 +5,7 @@ import type { DB } from "./db.js";
 import { displayName } from "./dialect.js";
 import { logActivity, notify } from "./events.js";
 import { HttpError, parseId } from "./http-error.js";
+import { releaseSalesRecords } from "./sales-setup.js";
 
 interface Deps {
   db: DB;
@@ -222,6 +223,7 @@ export function registerCollab(app: Express, { db, auth, uid }: Deps) {
       await t.run(`UPDATE time_entries SET ended_at = ? WHERE user_id = ? AND ended_at IS NULL AND task_id IN (SELECT id FROM tasks WHERE ${inWs})`, new Date().toISOString(), target, wsId);
       await t.run(`DELETE FROM gcal_links WHERE user_id = ? AND task_id IN (SELECT id FROM tasks WHERE ${inWs})`, target, wsId);
       await t.run("DELETE FROM alerts WHERE user_id = ? AND workspace_id = ?", target, wsId);
+      await releaseSalesRecords(t, wsId, target);
       await t.run("DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?", wsId, target);
       if (target !== me) await notify(t, { userId: target, kind: "removed", actorId: me, title: wsName });
     });

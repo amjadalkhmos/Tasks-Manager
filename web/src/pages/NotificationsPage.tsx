@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AtSign, BellOff, Check, LifeBuoy, MessageSquare, UserCheck, UserMinus, UserPlus } from "lucide-react";
+import { AtSign, BellOff, Check, LifeBuoy, MessageSquare, UserCheck, UserMinus, UserPlus, UserRoundPlus } from "lucide-react";
 import type { ReactNode } from "react";
 import { api, type Alert } from "../api";
 import { Avatar } from "../components/Avatar";
@@ -15,6 +15,7 @@ const ICONS: Record<Alert["kind"], ReactNode> = {
   invite_accepted: <UserPlus size={15} />,
   removed: <UserMinus size={15} />,
   ticket: <LifeBuoy size={15} />,
+  lead: <UserRoundPlus size={15} />,
 };
 
 function sentence(a: Alert, actor: string): ReactNode {
@@ -25,6 +26,7 @@ function sentence(a: Alert, actor: string): ReactNode {
     case "commented": return <>{actor} commented on {t}</>;
     case "invite_accepted": return <>{actor} joined <strong>{a.title}</strong></>;
     case "ticket": return <>New support ticket {t}</>;
+    case "lead": return actor === "Someone" ? <>Lead update: {t}</> : <>{actor} gave you the lead {t}</>;
     case "removed": return <>You were removed from <strong>{a.title}</strong></>;
   }
 }
@@ -97,7 +99,8 @@ export function NotificationsPage({ onOpenTask }: { onOpenTask: (id: number) => 
           const actor = a.actor_id ? nameOf(a.actor_id) : "Someone";
           const open = () => {
             if (!a.read) markRead.mutate([a.id]);
-            if (a.task_id !== null && a.kind !== "removed") onOpenTask(a.task_id);
+            if (a.kind === "lead" && a.workspace_id !== null) navigate(`/sales/${a.workspace_id}/leads`);
+            else if (a.task_id !== null && a.kind !== "removed") onOpenTask(a.task_id);
             else if (a.workspace_id !== null && a.kind === "invite_accepted") navigate(`/workspace/${a.workspace_id}`);
           };
           return (

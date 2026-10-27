@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "./app.js";
 import type { DB } from "./db.js";
+import { seedProjectStatuses } from "./statuses.js";
 import { testDb } from "./test-db.js";
 
 process.env.BCRYPT_ROUNDS = "4";
@@ -45,6 +46,14 @@ const task = async (a: Agent, body: object, status = 201) => (await a.post("/api
 const getTask = async (a: Agent, id: number) => (await a.get(`/api/tasks/${id}`).expect(200)).body as Json;
 const statuses = async (a: Agent) => (await a.get("/api/statuses").expect(200)).body as Json[];
 
+/** Sales pipelines now live under Sales and can't be created as projects; this makes the old kind, as an existing database still holds. */
+async function legacyPipeline(a: Agent, name: string) {
+  const p = (await a.post("/api/projects").send({ name, workspace_id: t.ws }).expect(201)).body as Json;
+  await t.db.run("UPDATE projects SET type = 'pipeline' WHERE id = ?", p.id);
+  await seedProjectStatuses(t.db, p.id, "pipeline");
+  return { ...p, type: "pipeline" } as Json;
+}
+
 let t: Team;
 beforeEach(async () => {
   t = await makeTeam();
@@ -58,7 +67,7 @@ describe("project types", () => {
     const support = await create(t.alice, { name: "Help desk", workspace_id: t.ws, type: "support" });
     expect(support.type).toBe("support");
     expect(await statusNames(t.carol, support.id)).toEqual(["New:todo", "In progress:doing", "Waiting on customer:doing", "Resolved:done"]);
-    const pipeline = await create(t.alice, { name: "Leads", workspace_id: t.ws, type: "pipeline" });
+    const pipeline = await legacyPipeline(t.alice, "Leads");
     expect(await statusNames(t.carol, pipeline.id)).toEqual(["New:todo", "Contacted:doing", "Qualified:doing", "Won:done", "Lost:done"]);
     const delivery = await create(t.alice, { name: "Site", workspace_id: t.ws, type: "delivery" });
     expect(await statusNames(t.carol, delivery.id)).toEqual(["To do:todo", "Doing:doing", "Review:doing", "Done:done"]);
@@ -72,7 +81,7 @@ describe("project types", () => {
   });
 
   it("puts a new task in the type's first status, and moves it through the pipeline", async () => {
-    const leads = await create(t.alice, { name: "Leads", workspace_id: t.ws, type: "pipeline" });
+    const leads = await legacyPipeline(t.alice, "Leads");
     const lead = await task(t.carol, { title: "Acme Ltd", project_id: leads.id });
     const list = await statuses(t.carol);
     expect(list.find((s) => s.id === lead.status_id)?.name).toBe("New");

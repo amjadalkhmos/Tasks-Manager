@@ -365,7 +365,7 @@ export interface ActivityItem {
 
 export interface Alert {
   id: number;
-  kind: "assigned" | "mentioned" | "commented" | "invite_accepted" | "removed" | "ticket";
+  kind: "assigned" | "mentioned" | "commented" | "invite_accepted" | "removed" | "ticket" | "lead";
   actor_id: number | null;
   task_id: number | null;
   workspace_id: number | null;
@@ -594,4 +594,351 @@ export const api = {
 
   notifications: () => request<Notification[]>("GET", "/notifications"),
   ackNotification: (id: number) => request<void>("POST", `/notifications/${id}/ack`),
+};
+
+// ---------- Sales ----------
+export type SalesLevel = "view" | "edit";
+export type StageKind = "open" | "won" | "lost";
+
+export interface SalesStage {
+  id: number;
+  pipeline_id: number;
+  name: string;
+  color: string;
+  position: number;
+  probability: number;
+  kind: StageKind;
+}
+export interface SalesPipeline {
+  id: number;
+  name: string;
+  currency: string;
+  position: number;
+  stages: SalesStage[];
+}
+export interface SalesPerson {
+  id: number;
+  name: string;
+}
+export interface SalesMeOn {
+  enabled: true;
+  manager: boolean;
+  role: Role;
+  user_id: number;
+  /** The owners whose records the caller can see, with their level. */
+  owners: (SalesPerson & { level: SalesLevel })[];
+  unassigned: SalesLevel | null;
+  /** Who the caller may give a record to. */
+  assignable: { owners: SalesPerson[]; unassigned: boolean };
+  pipelines: SalesPipeline[];
+}
+export type SalesMe = { enabled: false } | SalesMeOn;
+export interface SalesWorkspace {
+  id: number;
+  name: string;
+  manager: boolean;
+}
+
+export type LeadStatus = "new" | "working" | "qualified" | "disqualified";
+export interface Lead {
+  id: number;
+  name: string;
+  email: string;
+  phone: string;
+  company: string;
+  job_title: string;
+  source: "manual" | "form" | "import" | "other";
+  source_detail: string;
+  status: LeadStatus;
+  owner_id: number | null;
+  owner_name: string | null;
+  created_at: string;
+  last_activity_at: string;
+  disqualified_reason: string;
+  account_id: number | null;
+  deal_id: number | null;
+}
+export interface LeadDetail extends Lead {
+  workspace_id: number;
+  notes: string;
+  contact_id: number | null;
+  can_edit: boolean;
+  activities: SalesActivity[];
+  followups: FollowUp[];
+}
+
+export type AccountStatus = "prospect" | "customer" | "churned";
+export interface Account {
+  id: number;
+  name: string;
+  website: string;
+  industry: string;
+  size: string;
+  status: AccountStatus;
+  owner_id: number | null;
+  owner_name: string | null;
+  created_at: string;
+  contact_count: number;
+  open_deals: number;
+  open_value: number;
+}
+export interface DealSummary {
+  id: number;
+  title: string;
+  value: number | null;
+  expected_close: string | null;
+  closed_at: string | null;
+  owner_id: number | null;
+  owner_name: string | null;
+  stage_name: string;
+  stage_color: string;
+  stage_kind: StageKind;
+  currency: string;
+}
+export interface AccountDetail {
+  id: number;
+  workspace_id: number;
+  name: string;
+  website: string;
+  domain: string;
+  industry: string;
+  size: string;
+  phone: string;
+  status: AccountStatus;
+  notes: string;
+  owner_id: number | null;
+  owner_name: string | null;
+  can_edit: boolean;
+  contacts: { id: number; name: string; email: string; phone: string; job_title: string }[];
+  deals: DealSummary[];
+  activities: SalesActivity[];
+  followups: FollowUp[];
+}
+export interface Contact {
+  id: number;
+  name: string;
+  email: string;
+  phone: string;
+  job_title: string;
+  account_id: number | null;
+  account_name: string | null;
+  owner_id: number | null;
+  owner_name: string | null;
+}
+export interface ContactDetail extends Contact {
+  workspace_id: number;
+  notes: string;
+  can_edit: boolean;
+  deals: Pick<DealSummary, "id" | "title" | "value" | "stage_name" | "stage_color" | "stage_kind" | "currency">[];
+  activities: SalesActivity[];
+}
+export interface Deal {
+  id: number;
+  title: string;
+  value: number | null;
+  expected_close: string | null;
+  closed_at: string | null;
+  created_at: string;
+  stage_changed_at: string;
+  last_activity_at: string;
+  pipeline_id: number;
+  stage_id: number;
+  owner_id: number | null;
+  owner_name: string | null;
+  account_id: number | null;
+  account_name: string | null;
+  contact_id: number | null;
+  contact_name: string | null;
+  stage_name: string;
+  stage_color: string;
+  stage_kind: StageKind;
+  probability: number;
+  currency: string;
+  stalled: boolean;
+  days_in_stage: number;
+}
+export interface DealDetail extends Deal {
+  workspace_id: number;
+  notes: string;
+  lost_reason: string;
+  account_visible: boolean;
+  pipeline_name: string;
+  can_edit: boolean;
+  stages: Pick<SalesStage, "id" | "name" | "color" | "kind" | "probability">[];
+  activities: SalesActivity[];
+  followups: FollowUp[];
+}
+export type ActivityKind = "call" | "email" | "meeting" | "note" | "system";
+export interface SalesActivity {
+  id: number;
+  kind: ActivityKind;
+  subject: string;
+  body: string;
+  duration_min: number | null;
+  occurred_at: string;
+  user_id: number | null;
+  user_name: string | null;
+  lead_id: number | null;
+  deal_id: number | null;
+  account_id: number | null;
+  contact_id: number | null;
+  deal_title: string | null;
+}
+export interface FollowUp {
+  id: number;
+  title: string;
+  due_at: string | null;
+  status: string;
+}
+export interface MyFollowUp {
+  id: number;
+  title: string;
+  due_at: string | null;
+  deal_id: number | null;
+  lead_id: number | null;
+  account_id: number | null;
+  about: string | null;
+}
+export interface OwnerForecast {
+  owner_id: number | null;
+  owner_name: string;
+  open_count: number;
+  open_value: number;
+  weighted_value: number;
+  won_count: number;
+  won_value: number;
+  lost_count: number;
+}
+export interface SalesOverview {
+  pipeline: { id: number; name: string; currency: string } | null;
+  pipelines: { id: number; name: string; currency: string }[];
+  leads: { new: number; working: number; qualified: number; disqualified: number; inbox: number | null };
+  forecast?: Omit<PipelineForecast, "currency">;
+  by_owner?: OwnerForecast[];
+  avg_cycle_days?: number | null;
+  stalled?: { id: number; title: string; value: number | null; owner_id: number | null; days: number }[];
+  overdue_count?: number;
+  stalled_days?: number;
+}
+export interface AccessRow {
+  user_id: number;
+  name: string;
+  email: string;
+  role: Role;
+  everything: boolean;
+  enabled: boolean;
+  grants: { owner_id: number; level: SalesLevel }[];
+  unassigned: SalesLevel | null;
+}
+export interface LeadForm {
+  id: number;
+  name: string;
+  token: string;
+  enabled: boolean;
+  created_at: string;
+}
+export interface ImportPreview {
+  headers: string[];
+  suggested: Record<string, string>;
+  rows: number;
+  sample: Record<string, string>[];
+}
+export interface ImportResult {
+  created: number;
+  skipped: number;
+  failed: number;
+  errors: { row: number; message: string }[];
+}
+/** A "this already exists" answer: the record when the caller may see it, otherwise only that something matches. */
+export class DuplicateError extends ApiError {
+  constructor(
+    message: string,
+    public duplicate: { visible: boolean; id?: number; name?: string },
+  ) {
+    super(409, message);
+  }
+}
+
+const qs = (o: Record<string, string | number | boolean | null | undefined>) => {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== null && v !== "" && v !== false) p.set(k, String(v));
+  return p.toString();
+};
+
+/** Like request(), but a 409 about a duplicate carries what matched. Sales changes are never queued for later. */
+async function salesWrite<T>(method: string, url: string, body?: unknown): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`/api${url}`, { method, headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
+  } catch {
+    throw new ApiError(0, "You're offline. Sales changes need a connection.");
+  }
+  if (res.status === 204) return undefined as T;
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 409 && data.duplicate) throw new DuplicateError(data.error, data.duplicate);
+  if (!res.ok) throw new ApiError(res.status, data.error ?? res.statusText);
+  return data as T;
+}
+const salesRead = <T>(url: string) => request<T>("GET", url);
+
+export const salesApi = {
+  workspaces: () => salesRead<SalesWorkspace[]>("/sales/workspaces"),
+  me: (ws: number) => salesRead<SalesMe>(`/sales/me?workspace_id=${ws}`),
+  overview: (ws: number, pipelineId?: number, ownerId?: number) => salesRead<SalesOverview>(`/sales/forecast?${qs({ workspace_id: ws, pipeline_id: pipelineId, owner_id: ownerId })}`),
+  myFollowUps: (ws: number) => salesRead<MyFollowUp[]>(`/sales/my-followups?workspace_id=${ws}`),
+
+  leads: (ws: number, f: { status?: string; owner_id?: number; unassigned?: boolean; q?: string; source?: string } = {}) => salesRead<Lead[]>(`/sales/leads?${qs({ workspace_id: ws, ...f })}`),
+  lead: (id: number) => salesRead<LeadDetail>(`/sales/leads/${id}`),
+  createLead: (b: Record<string, unknown>) => salesWrite<{ id: number }>("POST", "/sales/leads", b),
+  updateLead: (id: number, b: Record<string, unknown>) => salesWrite<{ id: number }>("PATCH", `/sales/leads/${id}`, b),
+  deleteLead: (id: number) => salesWrite<void>("DELETE", `/sales/leads/${id}`),
+  qualifyLead: (id: number, b: Record<string, unknown>) => salesWrite<{ id: number; account_id: number | null; contact_id: number | null; deal_id: number | null }>("POST", `/sales/leads/${id}/qualify`, b),
+  disqualifyLead: (id: number, reason: string) => salesWrite<{ id: number }>("POST", `/sales/leads/${id}/disqualify`, { reason }),
+  reopenLead: (id: number) => salesWrite<{ id: number }>("POST", `/sales/leads/${id}/reopen`),
+  importPreview: (ws: number, csv: string) => salesWrite<ImportPreview>("POST", "/sales/leads/import", { workspace_id: ws, csv }),
+  importLeads: (b: Record<string, unknown>) => salesWrite<ImportResult>("POST", "/sales/leads/import", b),
+
+  accounts: (ws: number, f: { q?: string; status?: string; owner_id?: number } = {}) => salesRead<Account[]>(`/sales/accounts?${qs({ workspace_id: ws, ...f })}`),
+  account: (id: number) => salesRead<AccountDetail>(`/sales/accounts/${id}`),
+  createAccount: (b: Record<string, unknown>) => salesWrite<{ id: number }>("POST", "/sales/accounts", b),
+  updateAccount: (id: number, b: Record<string, unknown>) => salesWrite<{ id: number }>("PATCH", `/sales/accounts/${id}`, b),
+  deleteAccount: (id: number) => salesWrite<void>("DELETE", `/sales/accounts/${id}`),
+
+  contacts: (ws: number, f: { q?: string; account_id?: number; owner_id?: number } = {}) => salesRead<Contact[]>(`/sales/contacts?${qs({ workspace_id: ws, ...f })}`),
+  contact: (id: number) => salesRead<ContactDetail>(`/sales/contacts/${id}`),
+  createContact: (b: Record<string, unknown>) => salesWrite<{ id: number }>("POST", "/sales/contacts", b),
+  updateContact: (id: number, b: Record<string, unknown>) => salesWrite<{ id: number }>("PATCH", `/sales/contacts/${id}`, b),
+  deleteContact: (id: number) => salesWrite<void>("DELETE", `/sales/contacts/${id}`),
+
+  deals: (ws: number, f: { pipeline_id?: number; state?: string; owner_id?: number; unassigned?: boolean; account_id?: number; q?: string } = {}) => salesRead<Deal[]>(`/sales/deals?${qs({ workspace_id: ws, ...f })}`),
+  deal: (id: number) => salesRead<DealDetail>(`/sales/deals/${id}`),
+  createDeal: (b: Record<string, unknown>) => salesWrite<{ id: number }>("POST", "/sales/deals", b),
+  updateDeal: (id: number, b: Record<string, unknown>) => salesWrite<{ id: number }>("PATCH", `/sales/deals/${id}`, b),
+  deleteDeal: (id: number) => salesWrite<void>("DELETE", `/sales/deals/${id}`),
+
+  logActivity: (b: Record<string, unknown>) => salesWrite<{ id: number }>("POST", "/sales/activities", b),
+  deleteActivity: (id: number) => salesWrite<void>("DELETE", `/sales/activities/${id}`),
+  addFollowUp: (b: Record<string, unknown>) => salesWrite<{ id: number }>("POST", "/sales/followups", b),
+
+  access: (ws: number) => salesRead<AccessRow[]>(`/workspaces/${ws}/sales-access`),
+  setAccess: (ws: number, userId: number, b: { enabled: boolean; grants: { owner_id: number; level: SalesLevel }[]; unassigned: SalesLevel | null }) =>
+    salesWrite<{ user_id: number; enabled: boolean }>("PUT", `/workspaces/${ws}/sales-access/${userId}`, b),
+
+  createPipeline: (ws: number, name: string, currency: string) => salesWrite<{ id: number }>("POST", "/sales/pipelines", { workspace_id: ws, name, currency }),
+  updatePipeline: (id: number, b: { name?: string; currency?: string }) => salesWrite<{ id: number }>("PATCH", `/sales/pipelines/${id}`, b),
+  deletePipeline: (id: number) => salesWrite<void>("DELETE", `/sales/pipelines/${id}`),
+  addStage: (pipelineId: number, b: { name: string; color?: string; probability?: number; kind?: StageKind }) => salesWrite<{ id: number }>("POST", `/sales/pipelines/${pipelineId}/stages`, b),
+  updateStage: (id: number, b: { name?: string; color?: string; probability?: number; kind?: StageKind }) => salesWrite<{ id: number }>("PATCH", `/sales/stages/${id}`, b),
+  deleteStage: (id: number, moveTo?: number) => salesWrite<void>("DELETE", `/sales/stages/${id}${moveTo ? `?move_to=${moveTo}` : ""}`),
+  orderStages: (pipelineId: number, ids: number[]) => salesWrite<{ ids: number[] }>("PUT", `/sales/pipelines/${pipelineId}/stage-order`, { ids }),
+
+  forms: (ws: number) => salesRead<LeadForm[]>(`/sales/forms?workspace_id=${ws}`),
+  createForm: (ws: number, name: string) => salesWrite<LeadForm>("POST", "/sales/forms", { workspace_id: ws, name }),
+  updateForm: (id: number, b: { name?: string; enabled?: boolean; rotate?: boolean }) => salesWrite<{ id: number; token: string }>("PATCH", `/sales/forms/${id}`, b),
+  deleteForm: (id: number) => salesWrite<void>("DELETE", `/sales/forms/${id}`),
+
+  publicForm: (token: string) => request<{ name: string; workspace: string }>("GET", `/public/leads/${token}`),
+  publicInquiry: (token: string, b: Record<string, unknown>) => salesWrite<{ ok: true }>("POST", `/public/leads/${token}`, b),
+
+  convertProject: (projectId: number) => salesWrite<{ pipeline_id: number; deals: number; without_owner: number }>("POST", `/projects/${projectId}/convert-to-sales`),
 };

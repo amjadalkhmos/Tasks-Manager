@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Trash2, X } from "lucide-react";
 import { api, type Health, type Project, type ProjectOverview, type ProjectType, type Stage, type Task } from "../api";
@@ -83,6 +83,12 @@ export function ProjectPage({ onOpen }: { onOpen: (id: number) => void }) {
           )}
         </div>
         {p.description && <p className="desc">{p.description}</p>}
+        {p.type === "pipeline" && (
+          <p className="alert warn">
+            Sales now has its own area, with leads, accounts and deals that aren't tasks.{" "}
+            {o.access.can_manage && p.workspace_id !== null ? <Link to={`/sales/${p.workspace_id}/settings`}>Move this pipeline into Sales</Link> : "Ask an admin to move this pipeline into Sales."}
+          </p>
+        )}
         <div className="facts">
           <span>{TYPE_INFO[p.type].label}</span>
           {p.lead_name && <span>Lead: {p.lead_name}</span>}

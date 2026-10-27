@@ -249,6 +249,7 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     if (b.lead_id != null) await assertLeadAllowed(db, b.workspace_id ?? null, me, b.lead_id);
     if (b.start_date && b.target_date && b.target_date < b.start_date) throw new HttpError(400, "The target date can't be before the start date");
     const type = b.type ?? "initiative";
+    if (type === "pipeline") throw new HttpError(400, "Sales pipelines now live under Sales, with their own leads, accounts and deals");
     const id = await db.tx(async (t) => {
       const projectId = await t.insert(
         "INSERT INTO projects (user_id, name, color, workspace_id, type, description, lead_id, start_date, target_date) VALUES (?, ?, COALESCE(?, '#4f46e5'), ?, ?, ?, ?, ?, ?)",
@@ -267,6 +268,9 @@ export function registerTasks(app: Express, { db, auth, uid }: Deps) {
     if (!pa) throw new HttpError(404, "Project not found");
     if (pa.workspaceId !== null && !(pa.canManage || (pa.canWrite && pa.creatorId === uid(req)))) throw FORBIDDEN();
     if (b.lead_id != null) await assertLeadAllowed(db, pa.workspaceId, pa.creatorId, b.lead_id);
+    if (b.type === "pipeline" && (await db.get<{ type: string }>("SELECT type FROM projects WHERE id = ?", pa.id))?.type !== "pipeline") {
+      throw new HttpError(400, "Sales pipelines now live under Sales, with their own leads, accounts and deals");
+    }
     await db.tx(async (t) => {
       await t.run("UPDATE projects SET name = COALESCE(?, name), color = COALESCE(?, color), type = COALESCE(?, type), description = COALESCE(?, description) WHERE id = ?", b.name ?? null, b.color ?? null, b.type ?? null, b.description ?? null, pa.id);
       // These can be cleared, so they are set only when given (null clears).

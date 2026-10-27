@@ -23,13 +23,20 @@ A task manager you can use alone or with a team. Capture a task in one line, pla
 **Statuses, meetings and projects**
 - **Every task shows a status.** Out of the box that is To do, Doing or Done. A workspace's admins can define their own (for example *Backlog*, *In review*, *Shipped*) for the whole workspace, and any single project can define its own instead. Each status belongs to one of the three stages, which is what decides what counts as finished (completion, recurrence, dependencies and progress all use the stage). The Board uses a project's statuses as its columns.
 - **Meetings** are created in the app (private, or shared with a workspace) and linked to any number of tasks in the same place, from the task or from the *Meetings* page. They already carry a source and external id, so syncing with Google Calendar later can update meetings instead of duplicating them.
-- **Project types.** A project is a *Delivery* (dates, milestones, a timeline), a *Sales pipeline* (New → Contacted → Qualified → Won / Lost), *Support* (New → In progress → Waiting on customer → Resolved) or a simple *Initiative*. The type sets the starting statuses and the view the project opens on; everything can be changed afterwards.
+- **Project types.** A project is a *Delivery* (dates, milestones, a timeline), *Support* (New → In progress → Waiting on customer → Resolved) or a simple *Initiative*. (Selling has its own area, **Sales**, below.) The type sets the starting statuses and the view the project opens on; everything can be changed afterwards.
 - **One project home.** Each project has an **Overview** (what needs attention, progress, milestones, work by status and by person, updates), **Work** (list, board or timeline) and **Settings**. Managers open on the Overview; everyone else opens on their work.
 - **Plan over time.** Tasks have an optional start date and belong to a milestone, so a milestone shows its own progress and warns when its tasks are late or scheduled after its date. The timeline shows tasks as bars under their milestones. Progress is weighted by estimates (a task with no estimate counts as an hour), and the numbers also suggest a health (on track / at risk / off track) beside the team's own rating.
 - **Life cycle**: Planning → Active → On hold / Completed → Archived, with the allowed moves enforced, a note and history for every change, a warning before completing a project with open tasks, and archived projects hidden from the sidebar (and closed to new tasks) until restored.
-- **Sales pipeline.** Deals are tasks with a value and an expected close date. Each stage has a chance of winning (10 / 25 / 60 / 100 / 0 % to start, editable in Settings), so the Overview can show the open pipeline, a **weighted forecast**, what was won and lost, the win rate, and what is expected to close each month. The board shows each deal's value and each stage's total. Each project has its own currency.
 - **Support desk.** Tickets are tasks numbered #1, #2… in a Support project, with a requester, a source (form, email or team), a first-reply target and a resolution target. The **Queue** lists open tickets most urgent first, with a clock on each (due in…, at risk, overdue), and the Overview shows open, unanswered and late tickets and average reply and resolution times. Customers don't need an account: turn on **customer intake** in the project's Settings to get a public form link and an email address. Emailed replies that keep “[#123]” in the subject join ticket 123 (only from the person who raised it).
 - **For team members:** *My work* lists everything assigned to you across projects, soonest first. **For managers:** *Needs attention* shows projects drifting off plan, overdue and blocked work, unassigned work and who is carrying how much, across the workspaces you manage. *Projects* compares every project side by side.
+
+**Sales**
+- **Leads, accounts, contacts and deals are their own records, not tasks.** A *lead* is someone who might buy. *Qualifying* it creates an *account* (the company), a *contact* (the person) and, if you want, a *deal*, and keeps the links between them. A lead that isn't a fit is disqualified with a reason, and can be reopened.
+- **Pipelines.** A workspace has one or more pipelines, each with its own stages (open, won or lost). Every open stage carries a chance of winning, so the **Overview** shows the open pipeline, a **weighted forecast**, won and lost, win rate, average time to win, what is expected to close each month, deals past their close date, deals nobody has touched for 14 days, and a breakdown by owner. The **Pipeline** page is a board: drag a deal to the next stage (moving to a lost stage asks why).
+- **Activity and follow-ups.** Log calls, emails, meetings and notes against a lead, deal, account or contact; the app also writes stage and owner changes into the history. A *follow-up* is an ordinary task that points at the record, so it shows in your task lists and on the record.
+- **Whose records you see is granted, owner by owner.** Every lead, account, contact and deal has an owner. An owner or admin of the workspace switches Sales on for a person and chooses whose records they may **view** or **edit**; everyone always has their own. Unassigned records (the *inbox*) are a grant of their own. Workspace viewers never get more than view. Accounts and contacts follow the same rule (a contact belongs to its account's owner), and on an account you only see the deals you can see. Records can only be handed to people you may edit.
+- **Getting leads in.** Add them by hand, **import a CSV** (columns are matched for you, known email addresses are skipped, rows that can't be read are listed), or put a **public lead form** on your site: each form has a secret link, a hidden field and rate limits against bots, and every submission lands unassigned in the inbox and notifies the admins. Someone who writes again is added to their open lead as a note. Duplicate accounts, contacts and leads are flagged without revealing records you can't see.
+- Pipelines that used to be "sales pipeline" projects can be moved into Sales from *Sales → Settings → Old pipeline projects*: each task becomes a deal in a pipeline with the same stages, and the project is archived.
 
 **Works anywhere**
 - Installable as an app. It opens without a connection and shows your last-seen tasks; creating, editing, completing and deleting tasks while offline is saved on your device and synced when you reconnect.
@@ -149,6 +156,8 @@ server/   Express API (TypeScript)
   src/db-sqlite.ts, db-postgres.ts   The two drivers; db-schema.ts is the schema, dialect.ts the few SQL differences
   src/access.ts        The one place that decides who can see and do what
   src/tasks.ts         Tasks, projects and tags
+  src/sales-access.ts  Who may see and edit which sales records (grants by owner)
+  src/sales-*.ts       Sales: accounts and contacts, leads (form, import), deals, activity and forecast, pipelines and settings
   src/collab.ts        Workspaces, members, invitations, comments, activity, notifications
   src/extras.ts        Dependencies, checklists, saved lists, time tracking, stats
   src/dataio.ts        Import and export
@@ -159,6 +168,8 @@ web/      React + Vite app (TypeScript)
 ```
 
 **Access control.** Every route asks `server/src/access.ts` instead of writing its own `WHERE user_id = ?`, so there is a single definition of visibility. A task is visible if it is private and yours, or it is in a project of a workspace you belong to. Someone who can't see something gets a 404 (its existence isn't revealed); someone who can see it but isn't allowed to change it gets a 403.
+
+**Sales access.** Sales records have their own rule in `server/src/sales-access.ts`: each user has a set of owners they may view or edit, and every sales query filters on it, so a record you can't see is a 404 and one you can see but not change is a 403. Workspace owners and admins see everything.
 
 **One SQL for both databases.** Queries are written once, with `?` placeholders, in the subset both databases accept. Timestamps are stored as ISO-8601 text and yes/no values as 0/1 in both, so values behave identically. The handful of genuine differences (date arithmetic, a person's display name) live in `src/dialect.ts`. Database work inside a transaction must use the handle the transaction gives it (`db.tx(async (t) => …)`), never the outer `db`.
 
@@ -178,6 +189,7 @@ What is **not** covered by tests that touch the real world:
 ## Limitations to know about
 
 - **Support intake is inbound only.** Tickets arrive from the public form or from your mail provider forwarding messages to a webhook; the app doesn't send email, so reply to customers from your own mailbox and use “Mark first response” on the ticket. There is no pause on the clocks while waiting for a customer, and no CAPTCHA on the form (a hidden field, rate limits and a link you can rotate are the protection).
+- **Sales is not connected to your mailbox or phone.** Emails and calls are logged by hand, no email is sent from the app, and there is no lead scoring or automatic assignment (new form leads wait in the inbox for someone to take them). Sales data isn't part of the JSON/CSV export. Follow-ups are private tasks unless you put them in a project.
 - **No email is sent.** Workspace invitations appear under *Notifications* when the person signs in with the invited address (they can create the account first).
 - **Updates are not real-time.** The app checks for new notifications every 30 seconds and when you return to the window.
 - **Offline writes** cover task create, edit, complete and delete. Other changes (projects, comments, workspaces) need a connection and say so.

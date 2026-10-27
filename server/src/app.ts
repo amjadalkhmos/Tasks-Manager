@@ -16,6 +16,10 @@ import { registerIntake } from "./intake.js";
 import { registerMeetings } from "./meetings.js";
 import { registerProjectManagement } from "./pm.js";
 import { registerStatuses } from "./statuses.js";
+import { registerSalesAccounts } from "./sales-accounts.js";
+import { registerSalesDeals } from "./sales-deals.js";
+import { registerSalesLeads } from "./sales-leads.js";
+import { registerSalesSetup } from "./sales-setup.js";
 import { displayName } from "./dialect.js";
 import { makeKey } from "./secrets.js";
 
@@ -104,6 +108,10 @@ export function createApp(db: DB, secret: string, options: AppOptions = {}) {
   registerMeetings(app, { db, auth, uid });
   registerStatuses(app, { db, auth, uid });
   registerProjectManagement(app, { db, auth, uid });
+  registerSalesSetup(app, { db, auth, uid });
+  registerSalesAccounts(app, { db, auth, uid });
+  registerSalesLeads(app, { db, auth, uid });
+  registerSalesDeals(app, { db, auth, uid });
 
   // For load balancers and uptime checks: confirms the process is up and the database answers.
   app.get("/api/health", async (_req, res) => {

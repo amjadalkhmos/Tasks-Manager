@@ -10,7 +10,7 @@ export interface TypeInfo {
   view: "list" | "board" | "timeline" | "queue";
 }
 
-export const PROJECT_TYPES: ProjectType[] = ["delivery", "pipeline", "support", "initiative"];
+export const PROJECT_TYPES: ProjectType[] = ["delivery", "support", "initiative"]; // sales pipelines live under Sales now;
 
 export const TYPE_INFO: Record<ProjectType, TypeInfo> = {
   delivery: {
@@ -20,7 +20,7 @@ export const TYPE_INFO: Record<ProjectType, TypeInfo> = {
     view: "timeline",
   },
   pipeline: {
-    label: "Sales pipeline",
+    label: "Sales pipeline (old)",
     blurb: "Leads moving through stages until they're won or lost.",
     starts: "New · Contacted · Qualified · Won · Lost, as a board with deal values and a forecast",
     view: "board",

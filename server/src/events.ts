@@ -22,7 +22,7 @@ export type ActivityKind =
   | "meeting_linked"
   | "meeting_unlinked";
 
-export type AlertKind = "assigned" | "mentioned" | "commented" | "invite_accepted" | "removed" | "ticket";
+export type AlertKind = "assigned" | "mentioned" | "commented" | "invite_accepted" | "removed" | "ticket" | "lead";
 
 /** Records something that happened in a workspace. Personal (no workspace) activity is not logged. */
 export async function logActivity(

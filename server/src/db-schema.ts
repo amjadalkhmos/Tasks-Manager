@@ -250,6 +250,131 @@ CREATE TABLE IF NOT EXISTS meeting_tasks (
   task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   PRIMARY KEY (meeting_id, task_id)
 );
+
+-- Sales. Everything here belongs to a workspace and has an owner (a user, or NULL = unassigned). Who sees what is decided
+-- by sales_access: a row says "user_id may see (level 'view') or work on (level 'edit') the records owned by owner_id",
+-- and a row with owner_id NULL covers unassigned records. Workspace admins and owners see everything.
+CREATE TABLE IF NOT EXISTS sales_access (
+  id ${ID},
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  owner_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  level TEXT NOT NULL CHECK (level IN ('view','edit'))
+);
+CREATE TABLE IF NOT EXISTS pipelines (
+  id ${ID},
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'USD',
+  position INTEGER NOT NULL DEFAULT 0
+);
+-- kind says what a stage means: a deal in an 'open' stage is still being worked, 'won' and 'lost' close it.
+CREATE TABLE IF NOT EXISTS pipeline_stages (
+  id ${ID},
+  pipeline_id INTEGER NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  color TEXT NOT NULL DEFAULT '#64748b',
+  position INTEGER NOT NULL DEFAULT 0,
+  probability INTEGER NOT NULL DEFAULT 0 CHECK (probability BETWEEN 0 AND 100),
+  kind TEXT NOT NULL DEFAULT 'open' CHECK (kind IN ('open','won','lost'))
+);
+CREATE TABLE IF NOT EXISTS accounts (
+  id ${ID},
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  website TEXT NOT NULL DEFAULT '',
+  domain TEXT NOT NULL DEFAULT '',
+  industry TEXT NOT NULL DEFAULT '',
+  size TEXT NOT NULL DEFAULT '',
+  phone TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'prospect' CHECK (status IN ('prospect','customer','churned')),
+  notes TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT ${NOW_ISO}
+);
+-- A contact follows its account's owner (kept in step by the server), so one rule decides who sees both.
+CREATE TABLE IF NOT EXISTS contacts (
+  id ${ID},
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL DEFAULT '',
+  phone TEXT NOT NULL DEFAULT '',
+  job_title TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT ${NOW_ISO}
+);
+CREATE TABLE IF NOT EXISTS leads (
+  id ${ID},
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL DEFAULT '',
+  phone TEXT NOT NULL DEFAULT '',
+  company TEXT NOT NULL DEFAULT '',
+  job_title TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual','form','import','other')),
+  source_detail TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','working','qualified','disqualified')),
+  disqualified_reason TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+  deal_id INTEGER,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT ${NOW_ISO},
+  last_activity_at TEXT NOT NULL DEFAULT ${NOW_ISO},
+  qualified_at TEXT
+);
+CREATE TABLE IF NOT EXISTS deals (
+  id ${ID},
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  pipeline_id INTEGER NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+  stage_id INTEGER NOT NULL REFERENCES pipeline_stages(id),
+  owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  account_id INTEGER REFERENCES accounts(id),
+  contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  value ${REAL},
+  expected_close TEXT,
+  closed_at TEXT,
+  lost_reason TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT ${NOW_ISO},
+  stage_changed_at TEXT NOT NULL DEFAULT ${NOW_ISO},
+  last_activity_at TEXT NOT NULL DEFAULT ${NOW_ISO}
+);
+-- Calls, emails, meetings and notes logged against a record. 'system' entries are written by the app itself (a stage
+-- change, an owner change). Exactly one of the four record columns is set.
+CREATE TABLE IF NOT EXISTS sales_activities (
+  id ${ID},
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('call','email','meeting','note','system')),
+  subject TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  duration_min INTEGER,
+  occurred_at TEXT NOT NULL,
+  lead_id INTEGER REFERENCES leads(id) ON DELETE CASCADE,
+  deal_id INTEGER REFERENCES deals(id) ON DELETE CASCADE,
+  account_id INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
+  contact_id INTEGER REFERENCES contacts(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT ${NOW_ISO}
+);
+-- A public "contact us" form. Each submission becomes an unassigned lead; the token is the form's secret address.
+CREATE TABLE IF NOT EXISTS lead_forms (
+  id ${ID},
+  workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  token TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT ${NOW_ISO}
+);
 `;
 }
 
@@ -280,6 +405,25 @@ CREATE INDEX IF NOT EXISTS idx_meetings_user ON meetings(user_id, starts_at);
 CREATE INDEX IF NOT EXISTS idx_meetings_ws ON meetings(workspace_id, starts_at);
 CREATE INDEX IF NOT EXISTS idx_meeting_tasks_task ON meeting_tasks(task_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_meetings_external ON meetings(user_id, source, external_id) WHERE external_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_access_owner ON sales_access(workspace_id, user_id, owner_id) WHERE owner_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_access_unassigned ON sales_access(workspace_id, user_id) WHERE owner_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_pipelines_ws ON pipelines(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_stages_pipeline ON pipeline_stages(pipeline_id);
+CREATE INDEX IF NOT EXISTS idx_accounts_ws ON accounts(workspace_id, owner_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_ws ON contacts(workspace_id, owner_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(account_id);
+CREATE INDEX IF NOT EXISTS idx_leads_ws ON leads(workspace_id, owner_id, status);
+CREATE INDEX IF NOT EXISTS idx_deals_ws ON deals(workspace_id, owner_id);
+CREATE INDEX IF NOT EXISTS idx_deals_pipeline ON deals(pipeline_id, stage_id);
+CREATE INDEX IF NOT EXISTS idx_deals_account ON deals(account_id);
+CREATE INDEX IF NOT EXISTS idx_sales_act_lead ON sales_activities(lead_id);
+CREATE INDEX IF NOT EXISTS idx_sales_act_deal ON sales_activities(deal_id);
+CREATE INDEX IF NOT EXISTS idx_sales_act_account ON sales_activities(account_id);
+CREATE INDEX IF NOT EXISTS idx_sales_act_contact ON sales_activities(contact_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_forms_token ON lead_forms(token);
+CREATE INDEX IF NOT EXISTS idx_tasks_deal ON tasks(deal_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_lead ON tasks(lead_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_account ON tasks(account_id);
 `;
 
 /**
@@ -300,6 +444,10 @@ export const ADDED_COLUMNS: Record<string, [string, string][]> = {
     ["source", "TEXT NOT NULL DEFAULT 'internal' CHECK (source IN ('internal','form','email'))"],
     ["ticket_no", "INTEGER"],
     ["first_response_at", "TEXT"],
+    // A follow-up is an ordinary task that points at the sales record it is about.
+    ["deal_id", "INTEGER REFERENCES deals(id) ON DELETE SET NULL"],
+    ["lead_id", "INTEGER REFERENCES leads(id) ON DELETE SET NULL"],
+    ["account_id", "INTEGER REFERENCES accounts(id) ON DELETE SET NULL"],
   ],
   statuses: [["probability", "INTEGER CHECK (probability BETWEEN 0 AND 100)"]],
   comments: [["requester", "TEXT"]],
